@@ -237,7 +237,12 @@ kill $K2PID 2>/dev/null; wait $K2PID 2>/dev/null
 log "$(cat "$K2OUT")"
 
 # ---------------------------------------------------------------- check 11 (v1-schema migration)
-sqlite3 "$V1DB" <<'SQL'
+# Fixture built via python3 sqlite3 module — the sqlite3 CLI does not exist
+# on all CI runners (e.g. GitHub windows-latest).
+python3 - "$V1DB" <<'PYSQL'
+import sqlite3, sys, time
+con = sqlite3.connect(sys.argv[1])
+con.executescript("""
 CREATE TABLE sessions(
     id TEXT PRIMARY KEY, task TEXT, surface TEXT,
     started_at REAL, last_seen REAL, status TEXT DEFAULT 'active');
@@ -251,12 +256,15 @@ CREATE TABLE waiters(
 CREATE TABLE notifications(
     id INTEGER PRIMARY KEY AUTOINCREMENT, to_session TEXT, from_session TEXT,
     resource TEXT, kind TEXT, body TEXT, created_at REAL, read_at REAL);
-INSERT INTO sessions VALUES('v1sessionabcdef','legacy v1 task','cli',
-    strftime('%s','now'), strftime('%s','now'), 'active');
-INSERT INTO claims(session_id,resource,mode,task,claimed_at,ttl_min,status)
-    VALUES('v1sessionabcdef','res:LEGACY','exclusive','legacy claim',
-    strftime('%s','now'), 90, 'held');
-SQL
+""")
+now = time.time()
+con.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)",
+            ("v1sessionabcdef", "legacy v1 task", "cli", now, now, "active"))
+con.execute("INSERT INTO claims(session_id,resource,mode,task,claimed_at,ttl_min,status)"
+            " VALUES(?,?,?,?,?,?,?)",
+            ("v1sessionabcdef", "res:LEGACY", "exclusive", "legacy claim", now, 90, "held"))
+con.commit(); con.close()
+PYSQL
 OUT=$(HERMES_COORD_DB="$V1DB" co status 2>&1); RC=$?; log "$OUT"
 if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -q "v1sessio" \
    && printf '%s' "$OUT" | grep -q "res:LEGACY" \
@@ -274,8 +282,10 @@ if [ "$TB" -eq 0 ]; then ok "13. zero Python tracebacks across all captured outp
 else bad "13. zero tracebacks" "found $TB — see $LOG"; grep -n -A3 "Traceback" "$LOG" | head -20; fi
 
 # ---------------------------------------------------------------- cleanup
+# 2>/dev/null: on Windows runners SQLite WAL handles can linger briefly and
+# rm reports "Device or resource busy" — harmless; never fail the suite on it.
 rm -f "$DB" "$DB"-wal "$DB"-shm "$V1DB" "$V1DB"-wal "$V1DB"-shm \
-      "$EOUT" "$COUT" "$FOUT" "$GOUT" "$K1OUT" "$K2OUT" "$LOG"
+      "$EOUT" "$COUT" "$FOUT" "$GOUT" "$K1OUT" "$K2OUT" "$LOG" 2>/dev/null || true
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

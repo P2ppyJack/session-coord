@@ -103,5 +103,5 @@ OUT=$($PY $SC inbox --id $S2)
 ck "victim notified of steal + reason" 0 $? "confirmed dead" "$OUT"
 
 echo; echo "RESULT: $pass passed, $fail failed"
-rm -f /tmp/bwait_$$.out /tmp/bwait_$$.rc /tmp/race_$$.out "$HERMES_COORD_DB"*
+rm -f /tmp/bwait_$$.out /tmp/bwait_$$.rc /tmp/race_$$.out "$HERMES_COORD_DB"* 2>/dev/null || true
 exit $fail

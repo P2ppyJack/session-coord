@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
-# 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2.1 cron leg: cron-guard verb (deterministic wrapper for cron scripts: register ephemeral cron session + atomic claim; --policy skip|wait; stdout carries ONLY the coordination id so no_agent stdout-as-message semantics survive; holders get a cron_defer note on skip), cron manifest advisory (~/.hermes/state/cron_resources.json + jobs.json next_run_at -> "cron fires in ~Nm on this resource" warnings on claim/check/status; advisory only, never blocks), cron-aware verbs (HELD labels cron holders, preempt refuses vs crons — they cannot checkpoint/pause; wait or user-approved steal)
-# 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2: user-set priority ranks (1,2,3 + reorder), subagent lineage ranks (1a/1b via --parent/--slot, computed live so re-ranking a parent re-ranks its children), preempt protocol (user-priority request -> holder checkpoints+pauses -> auto-queued resume), pause/resume verbs, queue fencing (rank order + FIFO enforced on contended resources, liveness-gated), preempt alerts on every board touch, idempotent schema migration from v1. All v1 commands/outputs byte-compatible (19-test regression suite).
-# 2026-08-16 | claude-fable-5 | anthropic | desktop session | Initial build: cooperative multi-session registry (SQLite WAL; sessions/claims/waiters/notifications; atomic all-or-nothing batch claims; shared|exclusive modes; path-boundary dir conflicts; TTL reap w/ expired-holder warnings; wait->notify co-worker protocol; exit 75 = held, matching singleflight convention)
+# 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2.1 cron leg: cron-guard verb (deterministic wrapper for cron scripts: register ephemeral cron session + atomic claim; --policy skip|wait; stdout carries ONLY the coordination id so no_agent stdout-as-message semantics survive; holders get a cron_defer note on skip), cron manifest advisory (~/.hermes/state/cron_resources.json + jobs.json next_run_at -> "cron fires in ~Nm on this resource" warnings on claim/check/status; advisory only, never blocks), cron-aware verbs (HELD labels cron holders, preempt refuses vs crons — they cannot checkpoint/pause; wait or user-approved steal)  # noqa: E501
+# 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2: user-set priority ranks (1,2,3 + reorder), subagent lineage ranks (1a/1b via --parent/--slot, computed live so re-ranking a parent re-ranks its children), preempt protocol (user-priority request -> holder checkpoints+pauses -> auto-queued resume), pause/resume verbs, queue fencing (rank order + FIFO enforced on contended resources, liveness-gated), preempt alerts on every board touch, idempotent schema migration from v1. All v1 commands/outputs byte-compatible (19-test regression suite).  # noqa: E501
+# 2026-08-16 | claude-fable-5 | anthropic | desktop session | Initial build: cooperative multi-session registry (SQLite WAL; sessions/claims/waiters/notifications; atomic all-or-nothing batch claims; shared|exclusive modes; path-boundary dir conflicts; TTL reap w/ expired-holder warnings; wait->notify co-worker protocol; exit 75 = held, matching singleflight convention)  # noqa: E501
 """
 session_coord.py — cooperative coordination registry for concurrent Hermes sessions.
 
@@ -48,6 +48,7 @@ Priority flow (user says "this session first"):
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -56,16 +57,16 @@ import sys
 import time
 import uuid
 
+
 def _console_safe_stdio():
     """Make stdout/stderr never raise UnicodeEncodeError on narrow consoles
     (Windows cp1252, C-locale cron): keep the stream's own encoding but
     degrade unencodable chars (e.g. \u26a0) to '?' instead of crashing.
     JSON mode is already pure ASCII (json.dumps ensure_ascii=True)."""
     for stream in (sys.stdout, sys.stderr):
-        try:
+        # exotic stream wrapper — leave as-is
+        with contextlib.suppress(AttributeError, ValueError, OSError):
             stream.reconfigure(errors="replace")
-        except (AttributeError, ValueError, OSError):
-            pass  # exotic stream wrapper — leave as-is
 
 
 _console_safe_stdio()
@@ -1664,7 +1665,6 @@ def cmd_cron_guard(a):
     pairs = [(r, "exclusive") for r in resources]
 
     # capture claim-loop chatter away from stdout (no_agent: stdout == message)
-    import contextlib
     import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
