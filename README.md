@@ -1,5 +1,7 @@
 # session-coord — cooperative coordination for concurrent AI agent sessions
 
+[![tests](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml/badge.svg)](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml)
+
 **One machine. Several AI agent sessions. Subagent fan-outs. Scheduled cron jobs. All
 touching the same files, skills, GPU boxes, and state — at the same time.**
 
