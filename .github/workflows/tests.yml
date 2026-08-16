@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.8", "3.11", "3.13"]
+        exclude:
+          # macos-latest is arm64; no 3.8 builds published
+          - os: macos-latest
+            python: "3.8"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash   # Git Bash on Windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: v1 regression suite (19 checks)
+        run: bash scripts/selftest.sh
+      - name: v2 priority/fencing/lineage suite (26 checks)
+        run: bash scripts/selftest_priority.sh
+      - name: v2.1 cron-leg suite (38 checks)
+        run: bash scripts/selftest_cron.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: bandit (security)
+        run: pipx run bandit scripts/session_coord.py
+      - name: ruff (strict profile, line-length 100)
+        run: pipx run ruff check --select E,F,W,I,UP,SIM,ISC,RUF,B --line-length 100 scripts/session_coord.py
+      - name: shellcheck (guard + wrappers)
+        run: shellcheck scripts/coord_guard.sh examples/wrapper.example.sh
