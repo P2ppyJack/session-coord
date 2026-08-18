@@ -3,6 +3,52 @@
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/).
 
+## [2.2.0] — 2026-08-18
+
+### Added — inter-bot deconfliction (concurrent named agents / bot profiles)
+
+Coverage now extends to **bots**: persistent named agents that run as separate
+profiles side by side with interactive sessions — including their sub-sessions
+(bot-to-bot handoffs spawn fresh CLI runs) and their privately-stored scheduled
+routines. Deconfliction is inter-bot by construction: one shared board, no
+per-bot scopes — every actor sees every other actor's claims identically.
+
+- **Per-profile cron store merge**: `cron_store_jobs()` scans the default cron
+  store PLUS every `<profiles>/<name>/cron/jobs.json` (new
+  `HERMES_COORD_PROFILES_DIR` override, default `~/.hermes/profiles`). A bot's
+  routines now appear in the 12-hour radar, claim-time CRON ADVISORY warnings,
+  `cron-guard` resolution, and `wait-for-cron` — exactly like default-store jobs.
+- **`[bot:<profile>]` attribution**: profile jobs are name-tagged at load time
+  (already-tagged names are left alone), so every radar row, advisory, and
+  defer note names the owning bot with no extra lookups. Advisory and status
+  rows carry a `profile` field.
+- **Deterministic collision policy**: a job id present in both the default
+  store and a profile store resolves to the default store (first-seen wins;
+  profile scan order is sorted, so profile-vs-profile collisions are
+  deterministic too).
+- **Fail-open extended** (Rule 2): a missing, unreadable, or corrupt profile
+  store contributes nothing and breaks nothing.
+- **`resolve_cron_job` error clarity**: the no-match error now names both
+  store locations.
+- Documented the bot co-worker protocol (README §3.16): protocol travels in
+  the bot's standing prompt (handoff runs inherit no env); bot-to-bot chat is
+  negotiation (ETA, early release, batching) but never a lock — only a
+  successful claim authorizes mutation; ranks stay human-set.
+
+### Tests
+
+- `selftest_cron.sh` grows a hermetic v2.2 BOT LEG (7 checks, suite 38 → 45;
+  full matrix 83 → 90): profile-store radar visibility, advisory naming, guard
+  defer/acquire against a bot routine, double-tag prevention, collision
+  precedence, profile attribution, corrupt-store inertness. The suite pins
+  `HERMES_COORD_PROFILES_DIR` to scratch so real profiles never leak in.
+
+### Compatibility
+
+- No schema changes. All v1/v2/v2.1 commands, outputs, and the rc 0/75
+  contract are unchanged (19 + 26 v1/v2 suites re-run green). With no profiles
+  directory present, behavior is byte-for-byte v2.1.
+
 ## [2.1.0] — 2026-08-16
 
 ### Added — cron jobs as first-class coordination participants
