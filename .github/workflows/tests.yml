@@ -30,7 +30,7 @@ jobs:
         run: bash scripts/selftest.sh
       - name: v2 priority/fencing/lineage suite (26 checks)
         run: bash scripts/selftest_priority.sh
-      - name: v2.1 cron-leg suite (38 checks)
+      - name: v2.1 cron-leg + v2.2 bot-leg suite (45 checks)
         run: bash scripts/selftest_cron.sh
 
   lint:

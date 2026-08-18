@@ -1,11 +1,15 @@
 #!/bin/bash
-# End-to-end test of the v2.1 CRON LEG of session_coord.py.
-# Everything runs on scratch DB + scratch manifest + scratch cron store.
+# End-to-end test of the v2.1 CRON LEG + v2.2 BOT LEG of session_coord.py.
+# Everything runs on scratch DB + scratch manifests + scratch cron stores.
 SC="${SC:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/session_coord.py}"
-D=$(mktemp -d /tmp/cronleg.XXXXXX)
+D=$(mktemp -d "${TMPDIR:-/tmp}/cronleg.XXXXXX")
 export HERMES_COORD_DB="$D/board.db"
 export HERMES_COORD_CRON_MANIFEST="$D/manifest.json"
 export HERMES_COORD_CRON_JOBS="$D/jobs.json"
+# v2.2: the radar also globs <profiles>/*/cron/jobs.json (Bot Mode bots keep
+# their Routines in per-profile stores) — point it at scratch so the suite is
+# hermetic vs any real profiles directory on the machine.
+export HERMES_COORD_PROFILES_DIR="$D/profiles"
 PASS=0; FAIL=0
 ok(){ PASS=$((PASS+1)); echo "ok:   $1"; }
 bad(){ FAIL=$((FAIL+1)); echo "FAIL: $1"; }
@@ -158,6 +162,74 @@ OUT=$(co cron-guard --job whatever 2>&1); RC=$?
 OUT=$(co cron-guard --name adhoc --res "adhoc-key" 2>/dev/null); RC=$?
 [ $RC -eq 0 ] && ok "10c. guard works manifest-less with explicit --res" || bad "10c. rc=$RC"
 co done --id "$OUT" >/dev/null 2>&1
+
+# ============ 11. v2.2 BOT LEG: per-profile cron stores (Bot Mode routines)
+# A Bot Mode bot is a Hermes profile; its Routines live in the profile's OWN
+# cron store. The radar must merge every profile store with the default one,
+# attribute profile jobs as "[bot:<profile>]", survive broken stores, and
+# resolve id collisions default-store-first.
+export HERMES_COORD_CRON_MANIFEST="$D/manifest2.json" HERMES_COORD_CRON_JOBS="$D/jobs2.json"
+NEXT8=$(python3 -c "from datetime import datetime,timedelta; print((datetime.now().astimezone()+timedelta(minutes=8)).isoformat())")
+NEXT12=$(python3 -c "from datetime import datetime,timedelta; print((datetime.now().astimezone()+timedelta(minutes=12)).isoformat())")
+mkdir -p "$D/profiles/researcher/cron" "$D/profiles/broken/cron"
+# Default store: one job + a colliding id (the default copy must win).
+cat > "$D/jobs2.json" <<JSON
+{"jobs":[
+ {"id":"defaultjob001","name":"default sweep","enabled":true,"next_run_at":"$NEXT12"},
+ {"id":"sharedid00001","name":"default owner","enabled":true,"next_run_at":"$NEXT12"}
+]}
+JSON
+# Researcher bot store: routine on a shared box, a pre-tagged name (must not
+# get double-tagged), and a duplicate of the colliding id (must lose).
+cat > "$D/profiles/researcher/cron/jobs.json" <<JSON
+{"jobs":[
+ {"id":"researcherjb1","name":"morning digest","enabled":true,"next_run_at":"$NEXT8"},
+ {"id":"researcherjb2","name":"[bot:researcher] tagged already","enabled":true,"next_run_at":"$NEXT12"},
+ {"id":"sharedid00001","name":"bot impostor","enabled":true,"next_run_at":"$NEXT12"}
+]}
+JSON
+# A corrupt store must contribute nothing without breaking the scan.
+echo "NOT JSON {" > "$D/profiles/broken/cron/jobs.json"
+cat > "$D/manifest2.json" <<JSON
+{"jobs":{
+ "researcherjb1":{"name":"morning digest","resources":["box:gpu1"],"policy":"skip","critical":false},
+ "researcherjb2":{"name":"tagged already","resources":["res:tagcheck"],"policy":"skip","critical":false},
+ "defaultjob001":{"name":"default sweep","resources":["res:defaultkey"],"policy":"skip","critical":false}
+}}
+JSON
+# 11a. status radar sees the bot routine, tagged with its owning bot
+OUT=$(co status 2>&1)
+echo "$OUT" | grep -q "\[bot:researcher\] morning digest" && ok "11a. radar shows bot routine w/ [bot:] tag" || bad "11a. $OUT"
+# 11b. claim advisory on the shared box names the bot job
+S7=$(co register --task "gpu work" | head -1)
+OUT=$(co claim --id "$S7" --res "box:gpu1" --task gpu 2>&1)
+echo "$OUT" | grep -q "CRON ADVISORY.*\[bot:researcher\] morning digest" && ok "11b. claim advisory names bot routine" || bad "11b. $OUT"
+# 11c. cron-guard resolves a bot-store job id and defers vs the live claim
+OUT=$(co cron-guard --job researcherjb1 2>&1); RC=$?
+[ $RC -eq 75 ] && echo "$OUT" | grep -q "DEFER" && ok "11c. guard resolves bot job + defers vs holder" || bad "11c. rc=$RC $OUT"
+co done --id "$S7" >/dev/null 2>&1
+# ...and acquires once free
+GOUT=$(co cron-guard --job researcherjb1 2>/dev/null); RC=$?
+[ $RC -eq 0 ] && [[ "$GOUT" =~ ^[0-9a-f]{12}$ ]] && ok "11d. guard acquires bot job once free" || bad "11d. rc=$RC '$GOUT'"
+co done --id "$GOUT" >/dev/null 2>&1
+# 11e-g. load the module straight from $SC (portable — no installed paths)
+# and inspect the merged view: tag hygiene, collision winner, attribution.
+OUT=$(python3 - "$SC" <<'PYMOD'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("sc", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+j = m.cron_store_jobs()
+print(j["researcherjb2"]["name"])
+print(j["sharedid00001"]["name"])
+print(j["researcherjb1"]["profile"])
+PYMOD
+)
+echo "$OUT" | sed -n 1p | grep -qx "\[bot:researcher\] tagged already" && ok "11e. pre-tagged name not double-tagged" || bad "11e. $OUT"
+# 11f. id collision across stores: default store wins
+echo "$OUT" | sed -n 2p | grep -qx "default owner" && ok "11f. id collision -> default store wins" || bad "11f. $OUT"
+# 11g. profile attribution recorded; broken store contributed nothing (no crash)
+echo "$OUT" | sed -n 3p | grep -qx "researcher" && ok "11g. profile field carries bot name (broken store inert)" || bad "11g. $OUT"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

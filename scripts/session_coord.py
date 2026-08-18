@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
+# 2026-08-18 | claude-fable-5 | anthropic | desktop session | v2.2 Bot Mode integration: cron_store_jobs() now merges EVERY profile store (~/.hermes/profiles/*/cron/jobs.json — a Bot Mode bot IS a profile; its Routines live in its own store) with the default store (id collision: default wins); profile jobs get a "[bot:<profile>]" name tag surfaced through radar/advisories/guard/wait-for-cron; upcoming_cron_conflicts + status rows carry "profile"; resolve_cron_job error names both store locations; HERMES_COORD_PROFILES_DIR override for tests  # noqa: E501
 # 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2.1 cron leg: cron-guard verb (deterministic wrapper for cron scripts: register ephemeral cron session + atomic claim; --policy skip|wait; stdout carries ONLY the coordination id so no_agent stdout-as-message semantics survive; holders get a cron_defer note on skip), cron manifest advisory (~/.hermes/state/cron_resources.json + jobs.json next_run_at -> "cron fires in ~Nm on this resource" warnings on claim/check/status; advisory only, never blocks), cron-aware verbs (HELD labels cron holders, preempt refuses vs crons — they cannot checkpoint/pause; wait or user-approved steal)  # noqa: E501
 # 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2: user-set priority ranks (1,2,3 + reorder), subagent lineage ranks (1a/1b via --parent/--slot, computed live so re-ranking a parent re-ranks its children), preempt protocol (user-priority request -> holder checkpoints+pauses -> auto-queued resume), pause/resume verbs, queue fencing (rank order + FIFO enforced on contended resources, liveness-gated), preempt alerts on every board touch, idempotent schema migration from v1. All v1 commands/outputs byte-compatible (19-test regression suite).  # noqa: E501
 # 2026-08-16 | claude-fable-5 | anthropic | desktop session | Initial build: cooperative multi-session registry (SQLite WAL; sessions/claims/waiters/notifications; atomic all-or-nothing batch claims; shared|exclusive modes; path-boundary dir conflicts; TTL reap w/ expired-holder warnings; wait->notify co-worker protocol; exit 75 = held, matching singleflight convention)  # noqa: E501
@@ -49,6 +50,7 @@ Priority flow (user says "this session first"):
 
 import argparse
 import contextlib
+import glob
 import json
 import os
 import re
@@ -169,6 +171,11 @@ CRON_MANIFEST = os.path.expanduser(
 )
 CRON_JOBS_JSON = os.path.expanduser(
     os.environ.get("HERMES_COORD_CRON_JOBS", "~/.hermes/cron/jobs.json")
+)
+# Bot Mode (desktop hermes-bots plugin): a bot IS a Hermes profile; its
+# Routines are cron jobs in the profile's OWN store. The radar scans them all.
+CRON_PROFILES_DIR = os.path.expanduser(
+    os.environ.get("HERMES_COORD_PROFILES_DIR", "~/.hermes/profiles")
 )
 CRON_ADVISORY_S = 90 * 60       # claim/check warn horizon: fires within 90 min
 CRON_STATUS_S = 12 * 3600       # status shows manifested fires within 12 h
@@ -630,17 +637,34 @@ def load_cron_manifest():
     return out
 
 
-def cron_store_jobs():
-    """{job_id: {next_ts, last_ts, name, enabled}} best-effort from the Hermes
-    cron store. Read-only; any parse problem -> {}."""
+def _read_cron_store(path):
+    """[job dicts] from one Hermes cron jobs.json. Any problem -> [].
+
+    Fail-inert by design: cron visibility is advisory, so an unreadable,
+    missing, or corrupt store must degrade to "no jobs seen" — never break
+    claims/status/guards for every session on the box. Accepts the three
+    store shapes Hermes has shipped: {"jobs":[...]}, bare list, {id: job}.
+    """
     try:
-        with open(CRON_JOBS_JSON, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             store = json.load(f)
     except (OSError, ValueError):
-        return {}
+        return []
     jobs = store.get("jobs", store if isinstance(store, list) else [])
     if isinstance(jobs, dict):
         jobs = list(jobs.values())
+    return [j for j in jobs if isinstance(j, dict)]
+
+
+def cron_store_jobs():
+    """{job_id: {next_ts, last_ts, name, enabled, profile}} best-effort from
+    the DEFAULT Hermes cron store PLUS every profile store
+    (<profiles>/<name>/cron/jobs.json — Bot Mode: a bot is a profile and its
+    Routines live in the bot's own store). Profile jobs get a load-time
+    "[bot:<profile>] " name tag (skipped when the name already carries one,
+    as Bot-Mode-created routines do) so every downstream radar/advisory/guard
+    message names the owning bot for free. Read-only; a broken store just
+    contributes nothing. Id collision across stores: default store wins."""
     from datetime import datetime
 
     def ts_of(v):
@@ -656,16 +680,38 @@ def cron_store_jobs():
         except (ValueError, TypeError):
             return None
 
+    # Store scan order IS the collision policy: the default store is listed
+    # first and first-seen wins below, so a profile job can never shadow a
+    # default-store job sharing its id. sorted() keeps profile order (and thus
+    # profile-vs-profile collisions) deterministic — raw glob order is
+    # filesystem-dependent.
+    stores = [(CRON_JOBS_JSON, None)]
+    for p in sorted(glob.glob(os.path.join(CRON_PROFILES_DIR, "*", "cron", "jobs.json"))):
+        # <profiles>/<name>/cron/jobs.json -> profile name is two dirs up.
+        prof = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        stores.append((p, prof))
+
     out = {}
-    for j in jobs:
-        if not isinstance(j, dict):
-            continue
-        out[str(j.get("id"))] = {
-            "next_ts": ts_of(j.get("next_run_at")),
-            "last_ts": ts_of(j.get("last_run_at")),
-            "name": j.get("name") or str(j.get("id"))[:12],
-            "enabled": bool(j.get("enabled", True)),
-        }
+    for path, prof in stores:
+        for j in _read_cron_store(path):
+            jid = str(j.get("id"))
+            if jid in out:
+                continue  # collision: first-seen (default store) wins
+            nm = j.get("name") or jid[:12]
+            # Attribute profile (bot) jobs in the display name itself so every
+            # downstream surface (radar, advisories, guard defer notes) names
+            # the owning bot with no extra lookups. Substring check, not
+            # startswith: Bot-Mode-created routines arrive pre-tagged and some
+            # carry a leading marker before the tag.
+            if prof and "[bot:" not in nm:
+                nm = f"[bot:{prof}] {nm}"
+            out[jid] = {
+                "next_ts": ts_of(j.get("next_run_at")),
+                "last_ts": ts_of(j.get("last_run_at")),
+                "name": nm,
+                "enabled": bool(j.get("enabled", True)),
+                "profile": prof,
+            }
     return out
 
 
@@ -689,10 +735,16 @@ def upcoming_cron_conflicts(resources, horizon_s):
         for jr in spec["resources"]:
             for r in resources:
                 if resources_overlap(jr, r):
-                    out.append({"job": jid, "name": spec["name"] or j["name"],
+                    # Profile (bot) jobs: prefer the store's tagged name so
+                    # the advisory names the owning bot even when the manifest
+                    # entry's name lacks the [bot:] tag.
+                    nm = (j["name"] if j.get("profile")
+                          else (spec["name"] or j["name"]))
+                    out.append({"job": jid, "name": nm,
                                 "resource": jr, "fires_in_s": max(0, int(eta)),
                                 "policy": spec["policy"],
-                                "critical": spec["critical"]})
+                                "critical": spec["critical"],
+                                "profile": j.get("profile")})
                     break
             else:
                 continue
@@ -1526,7 +1578,8 @@ def cmd_status(a):
             clash = sorted({c["resource"] for c in claims
                             for jr in spec["resources"]
                             if resources_overlap(jr, norm_resource(c["resource"]))})
-            cron_rows.append({"job": h["job"], "name": spec["name"],
+            cron_rows.append({"job": h["job"], "name": h["name"],
+                              "profile": h.get("profile"),
                               "resources": spec["resources"],
                               "policy": spec["policy"],
                               "critical": spec["critical"],
@@ -1607,7 +1660,8 @@ def resolve_cron_job(token):
             return i, nm, store.get(i), None
         if len(cands) > 1:
             return None, None, None, f"ambiguous job '{token}': {', '.join(c[:12] for c in cands)}"
-    return None, None, None, f"no cron job matches '{token}' (store: {CRON_JOBS_JSON})"
+    return None, None, None, (f"no cron job matches '{token}' (stores: "
+                              f"{CRON_JOBS_JSON} + {CRON_PROFILES_DIR}/*/cron/jobs.json)")
 
 
 def log_cron_event(conn, job_id, job_name, event, session_id, reason):

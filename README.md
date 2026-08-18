@@ -2,8 +2,9 @@
 
 [![tests](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml/badge.svg)](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml)
 
-**One machine. Several AI agent sessions. Subagent fan-outs. Scheduled cron jobs. All
-touching the same files, skills, GPU boxes, and state — at the same time.**
+**One machine. Several AI agent sessions. Subagent fan-outs. Scheduled cron jobs.
+Named bots with their own sub-sessions and routines. All touching the same files,
+skills, GPU boxes, and state — at the same time.**
 
 `session-coord` is a small, dependency-free SQLite-backed coordination board plus a CLI
 (`session_coord.py`) and a zero-token cron guard (`coord_guard.sh`) that let all of those
@@ -37,6 +38,7 @@ shared resource can participate.
    - 3.13 The zero-token cron guard
    - 3.14 Critical crons: never defer silently
    - 3.15 Responsibility tracking: a paused job must be somebody's problem
+   - 3.16 Bots (concurrent named agents) and inter-bot deconfliction
 4. [Threat-model summary table](#4-threat-model-summary)
 5. [What this deliberately is NOT](#5-what-this-deliberately-is-not)
 6. [Quality: how this was tested and scanned](#6-quality-testing-and-scans)
@@ -328,6 +330,36 @@ any cron the session noted `paused` but never `resumed`, refusing to let the dep
 silent. The failure mode is reduced from "backup silently off for a month" to "impossible
 to walk away without being told".
 
+### 3.16 Bots (concurrent named agents) and inter-bot deconfliction
+
+Some agent stacks run **named persistent agents** ("bots") side by side: each bot is a
+full profile with its own memory, sessions, and — crucially — its own cron store of
+scheduled routines (`<profiles>/<bot>/cron/jobs.json`). Bots spawn sub-sessions
+(bot-to-bot handoffs run as fresh CLI invocations) and message each other, which
+multiplies the concurrency without adding any built-in collision control.
+
+`session-coord` treats bots as ordinary co-workers, and the coverage is **inter-bot by
+construction**: there are no per-bot scopes. One shared board sees every actor —
+interactive sessions, subagents, cron guards, every bot, and every bot-spawned
+sub-session. Bot A's `claim`/`status`/exit-75 sees bot B's holds identically to a
+human session's. Three mechanisms make bots first-class:
+
+- **Per-profile cron radar.** The store scanner merges the default cron store with
+  every profile store (`HERMES_COORD_PROFILES_DIR`, default `~/.hermes/profiles`).
+  A bot's routines surface in the radar, claim advisories, and the zero-token guard
+  exactly like default-store jobs. Id collisions resolve default-store-first; a
+  corrupt profile store contributes nothing (Rule 2: fail-open).
+- **Attribution everywhere.** Profile jobs are tagged `[bot:<profile>]` at load time,
+  so every advisory, defer note, and radar row names the owning bot with no extra
+  lookups. Bots register with `--surface bot:<name>` so board rows and HELD messages
+  identify them.
+- **Protocol by prompt, not by env.** Bot handoff runs inherit no environment, so the
+  coordination protocol travels in the bot's standing prompt/persona file (the same
+  way subagents receive it). Chat between bots is *negotiation* — ask a holder's ETA,
+  request early release, offer to batch work — but **chat is never a lock**: only a
+  successful claim authorizes mutation, because messages are neither atomic nor able
+  to interrupt a mid-turn bot. Ranks stay human-set; bots never self-prioritize.
+
 ## 4. Threat-model summary
 
 | Failure mode (without coordination) | Protection (section) |
@@ -347,6 +379,9 @@ to walk away without being told".
 | Session's work destroyed by a scheduled job it never saw coming | Claim-time cron advisories + 12 h radar (3.12) |
 | Critical job silently misses its window | Critical decision brief, user-in-the-loop (3.14) |
 | Paused cron forgotten forever | Responsibility ledger + done-time nag (3.15) |
+| Concurrent bots race each other's (or a session's) work | One shared board, no per-bot scopes; protocol in the bot's standing prompt (3.16) |
+| A bot's scheduled routine fires unseen from its private cron store | Per-profile store merge + `[bot:]`-attributed radar/advisories/guard (3.16) |
+| Bots "agree" in chat, then both mutate | Chat is negotiation, never a lock: only a claim authorizes mutation (3.16) |
 | Coordination system itself breaks | Fail-open everywhere; guard proceeds on any error (Rule 2) |
 
 ## 5. What this deliberately is NOT
@@ -370,15 +405,15 @@ actors. They compose: single-flight guards re-entrancy, the board guards intent.
 Everything below ships in the repo (`scripts/selftest*.sh`) and is re-runnable in one
 command each; nothing is claimed that a clone cannot re-verify.
 
-**Regression / compatibility / feature suites — 83 checks, all green:**
+**Regression / compatibility / feature suites — 90 checks, all green:**
 
 | Suite | Checks | What it proves |
 |---|---|---|
 | `selftest.sh` (v1 regression) | 19 | Original claim/wait/release/steal/expiry semantics unchanged |
 | `selftest_priority.sh` (v2) | 26 | Ranks, fencing, FIFO, lineage, pause/resume, preempt dedupe, urgent alerts, **pinned v1-schema fixture migration** |
-| `selftest_cron.sh` (v2.1) | 38 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag |
+| `selftest_cron.sh` (v2.1+v2.2) | 45 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness** |
 
-**Platforms actually executed, not assumed:** the full 83-check matrix runs green on
+**Platforms actually executed, not assumed:** the full 90-check matrix runs green on
 macOS (Apple Silicon) and Ubuntu Linux (byte-identical file verified by checksum before
 the run). The CLI was additionally executed under real Python 3.8, 3.9, 3.11, 3.12, and
 3.13 interpreters. Hostile-console behavior (C locale / `PYTHONIOENCODING=ascii` with
@@ -387,8 +422,8 @@ forms (drive-letter, UNC) are normalized and unit-verified; bash components targ
 POSIX/Git-Bash.
 
 **Compatibility discipline:** versioned, additive-only schema migrations; a database
-created by v1 opens and works under v2.1 (pinned-fixture test); with no ranks and no cron
-manifest, v2.1 behavior is byte-for-byte v1. The production board this was developed
+created by v1 opens and works under v2.2 (pinned-fixture test); with no ranks, no cron
+manifest, and no profiles directory, v2.2 behavior is byte-for-byte v1. The production board this was developed
 against was live-migrated in place with zero data loss.
 
 **Adversarial review:** before release, an independent agent was given the spec and told
