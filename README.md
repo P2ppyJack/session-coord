@@ -349,6 +349,16 @@ human session's. Three mechanisms make bots first-class:
   A bot's routines surface in the radar, claim advisories, and the zero-token guard
   exactly like default-store jobs. Id collisions resolve default-store-first; a
   corrupt profile store contributes nothing (Rule 2: fail-open).
+
+  *Field note (live deployment):* the radar reads **schedules, not run health** — a
+  routine can show as scheduled while every fire has failed (the store's
+  `last_status`/`failure_streak` are where health lives; check them when a radar
+  entry matters to your decision). One concrete trap: schedulers typically resolve
+  a routine's bare `script:` filename against the **owning profile's** scripts
+  directory, not a shared one — a bot routine whose script sits in the default
+  scripts dir fails only at fire time, invisibly to the radar. Deploy the script
+  into the bot's own profile and verify with one live fire, not by reading the
+  schedule.
 - **Attribution everywhere.** Profile jobs are tagged `[bot:<profile>]` at load time,
   so every advisory, defer note, and radar row names the owning bot with no extra
   lookups. Bots register with `--surface bot:<name>` so board rows and HELD messages

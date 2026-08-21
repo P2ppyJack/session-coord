@@ -3,6 +3,17 @@
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Docs
+
+- README §3.16 field note from live deployment: the cron radar surfaces
+  *schedules, not run health* — check the store's `last_status`/`failure_streak`
+  when a radar entry matters. Concrete trap documented: bot-profile routines
+  resolve bare `script:` filenames against the owning profile's own scripts
+  directory, so a script placed in the shared/default scripts dir fails only at
+  fire time, invisibly to the radar. Verify fixtures with one live fire.
+
 ## [2.2.0] — 2026-08-18
 
 ### Added — inter-bot deconfliction (concurrent named agents / bot profiles)
