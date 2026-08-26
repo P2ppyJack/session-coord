@@ -370,6 +370,54 @@ human session's. Three mechanisms make bots first-class:
   successful claim authorizes mutation, because messages are neither atomic nor able
   to interrupt a mid-turn bot. Ranks stay human-set; bots never self-prioritize.
 
+The exact enrollment texts ship in the repo so you don't have to reinvent them:
+[`examples/bot-soul-coordination.example.md`](examples/bot-soul-coordination.example.md)
+(paste into a bot's persona) and
+[`examples/subagent-prompt.example.md`](examples/subagent-prompt.example.md)
+(paste into a fan-out child's prompt).
+
+### 3.17 The master switch: turn coordination off without uninstalling
+
+Coordination is *cooperative* — valuable when several actors share a machine,
+pure overhead when you are the only one running. Rather than force an
+uninstall, the whole layer has a single **master switch** that makes every verb
+a fail-open no-op while leaving the code, the board data, and the cron wiring
+exactly in place.
+
+```bash
+session_coord.py switch            # report state + what is deciding it
+session_coord.py disable           # turn the whole board OFF (persistent)
+session_coord.py enable            # turn it back ON
+session_coord.py switch toggle     # flip it
+```
+
+**What OFF means.** While disabled, every coordination verb short-circuits to a
+friendly no-op that *never blocks a caller* and preserves each verb's stdout
+contract, so a disabled board behaves exactly like "coordination was never
+installed": `register` still prints a synthetic id (so `ID=$(… register)`
+scripts keep working), `claim`/`check` return success/FREE, and — critically —
+`cron-guard` emits empty stdout so the shell guard reads "no id → run
+unguarded." The switch-management verbs (`switch`/`enable`/`disable`) always
+run, so you can never lock yourself out.
+
+**Two layers, one decision.** The Python CLI and the shell cron guard
+(`coord_guard.sh`) read the switch through **identical precedence**, and the
+guard does it *without spawning Python* (zero cost when off):
+
+1. **`HERMES_COORD_DISABLED`** (environment) — an explicit override in **both**
+   directions, scoped to one process tree. Truthy (`1`, `true`, `yes`, `on`, or
+   any other non-empty value) forces OFF; `0`/`false`/`no`/`off` forces ON.
+   Ideal for a one-shot run or a test: `HERMES_COORD_DISABLED=1 ./my-wrapper.sh`.
+2. **Sentinel file** (`~/.hermes/state/coordination_disabled`, override with
+   `HERMES_COORD_DISABLED_FILE`) — the persistent switch that `disable`/`enable`
+   write and remove. This is what survives reboots.
+3. **Default: ON.** Absent both, coordination is enabled.
+
+Because the guard honors the same sentinel, disabling coordination instantly
+makes every cron wrapper run unguarded too — the switch is genuinely global,
+not merely session-scoped. `switch` reports exactly which of the three is
+currently deciding, and warns if an env override is masking your sentinel.
+
 ## 4. Threat-model summary
 
 | Failure mode (without coordination) | Protection (section) |
@@ -392,6 +440,7 @@ human session's. Three mechanisms make bots first-class:
 | Concurrent bots race each other's (or a session's) work | One shared board, no per-bot scopes; protocol in the bot's standing prompt (3.16) |
 | A bot's scheduled routine fires unseen from its private cron store | Per-profile store merge + `[bot:]`-attributed radar/advisories/guard (3.16) |
 | Bots "agree" in chat, then both mutate | Chat is negotiation, never a lock: only a claim authorizes mutation (3.16) |
+| Coordination is pure overhead for a solo operator, tempting a risky uninstall | Master switch: fail-open no-op, code/data/wiring left in place (3.17) |
 | Coordination system itself breaks | Fail-open everywhere; guard proceeds on any error (Rule 2) |
 
 ## 5. What this deliberately is NOT
@@ -415,15 +464,16 @@ actors. They compose: single-flight guards re-entrancy, the board guards intent.
 Everything below ships in the repo (`scripts/selftest*.sh`) and is re-runnable in one
 command each; nothing is claimed that a clone cannot re-verify.
 
-**Regression / compatibility / feature suites — 90 checks, all green:**
+**Regression / compatibility / feature suites — 118 checks, all green:**
 
 | Suite | Checks | What it proves |
 |---|---|---|
 | `selftest.sh` (v1 regression) | 19 | Original claim/wait/release/steal/expiry semantics unchanged |
 | `selftest_priority.sh` (v2) | 26 | Ranks, fencing, FIFO, lineage, pause/resume, preempt dedupe, urgent alerts, **pinned v1-schema fixture migration** |
 | `selftest_cron.sh` (v2.1+v2.2) | 45 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness** |
+| `selftest_toggle.sh` (v2.3) | 28 | **Master switch**: OFF is a fail-open no-op on every verb (register still yields an id, cron-guard stdout stays empty), ON restores conflict detection, env overrides the sentinel both directions, and the shell guard honors the switch — plus the enabled path proven unchanged by the 90 checks above |
 
-**Platforms actually executed, not assumed:** the full 90-check matrix runs green on
+**Platforms actually executed, not assumed:** the full 118-check matrix runs green on
 macOS (Apple Silicon) and Ubuntu Linux (byte-identical file verified by checksum before
 the run). The CLI was additionally executed under real Python 3.8, 3.9, 3.11, 3.12, and
 3.13 interpreters. Hostile-console behavior (C locale / `PYTHONIOENCODING=ascii` with
@@ -432,8 +482,10 @@ forms (drive-letter, UNC) are normalized and unit-verified; bash components targ
 POSIX/Git-Bash.
 
 **Compatibility discipline:** versioned, additive-only schema migrations; a database
-created by v1 opens and works under v2.2 (pinned-fixture test); with no ranks, no cron
-manifest, and no profiles directory, v2.2 behavior is byte-for-byte v1. The production board this was developed
+created by v1 opens and works under v2.3 (pinned-fixture test); with no ranks, no cron
+manifest, and no profiles directory, v2.3 behavior is byte-for-byte v1. The master switch
+(v2.3) adds no schema and defaults to ON, so an existing board is unaffected until you
+flip it. The production board this was developed
 against was live-migrated in place with zero data loss.
 
 **Adversarial review:** before release, an independent agent was given the spec and told
@@ -464,9 +516,28 @@ dated, attributed), plus the repository `CHANGELOG.md`.
 
 ## 8. Install and quick start
 
+**One-command install (recommended).** Cross-platform, pure standard library,
+no network. It copies the CLI + guard + selftests into place, creates the state
+directory, **never touches an existing board DB or cron manifest**, backs up any
+locally-modified script before replacing it, and then proves itself by running
+the full selftest matrix:
+
 ```bash
-# 1. Drop the CLI somewhere on PATH (stdlib only, Python ≥3.8)
-cp scripts/session_coord.py ~/.hermes/scripts/
+python3 install.py                 # install or upgrade into ~/.hermes
+python3 install.py --check         # dry run: show what WOULD change, touch nothing
+python3 install.py --dest /opt/coord/bin --state-dir /var/lib/coord   # custom paths
+python3 install.py --seed-manifest # also drop an example cron manifest if none exists
+```
+
+Re-running is safe: an existing install is upgraded in place (unchanged files
+are reported `unchanged`; a changed file is backed up to `<name>.bak-<ts>`
+first). The installer never flips the master switch and never deletes anything.
+
+**Manual install** (if you prefer to place files yourself):
+
+```bash
+# 1. Drop the CLI + guard somewhere on PATH (stdlib only, Python ≥3.8)
+cp scripts/session_coord.py scripts/coord_guard.sh ~/.hermes/scripts/
 
 # 2. A session's lifecycle
 SID=$(python3 session_coord.py register --task "refactor helper lib" --surface desktop)
@@ -474,16 +545,30 @@ python3 session_coord.py claim  --id "$SID" --res file:~/project/lib --res skill
 #   ... work ...
 python3 session_coord.py done   --id "$SID"       # release everything, notify waiters
 
-# 3. Wire the cron guard into a wrapper (optional, fail-open)
-#    first line after the shebang:
+# 3. Wire the cron guard into a wrapper (optional, fail-open) — see examples/wrapper.example.sh
 source ~/.hermes/scripts/coord_guard.sh           # exits 75 if it should defer
 
 # 4. Tell the board what your crons touch (optional)
 cp examples/cron_resources.example.json ~/.hermes/state/cron_resources.json
 
 # 5. Verify everything on your machine
-bash scripts/selftest.sh && bash scripts/selftest_priority.sh && bash scripts/selftest_cron.sh
+bash scripts/selftest.sh && bash scripts/selftest_priority.sh && \
+  bash scripts/selftest_cron.sh && bash scripts/selftest_toggle.sh
 ```
+
+**Turning it off.** Coordination is overhead when you run solo. Disable the
+whole layer without uninstalling — every verb and every cron guard becomes a
+fail-open no-op (see §3.17):
+
+```bash
+python3 session_coord.py disable    # or: enable / switch / switch toggle
+HERMES_COORD_DISABLED=1 ./one-shot-wrapper.sh   # off for just this run
+```
+
+**Enrollment for bots and subagents.** Concurrent named agents and fan-out
+children inherit no environment, so they learn the protocol from their prompt.
+Ready-to-paste texts ship in `examples/bot-soul-coordination.example.md` and
+`examples/subagent-prompt.example.md`.
 
 ## 9. Command tour
 
@@ -500,6 +585,7 @@ bash scripts/selftest.sh && bash scripts/selftest_priority.sh && bash scripts/se
 | `cron-guard` | The guard's board query (used by `coord_guard.sh`) |
 | `wait-for-cron` | Block until a scheduled job has actually fired |
 | `cron-note` | Book responsibility for pausing/resuming a cron |
+| `switch` / `enable` / `disable` | **Master switch**: report, or turn the whole board off/on (fail-open no-op while off) |
 
 ---
 

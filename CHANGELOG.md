@@ -5,8 +5,64 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-08-26
+
+### Added — master switch (turn coordination off without uninstalling)
+
+Coordination is cooperative: valuable when several actors share a machine, pure
+overhead for a solo operator. Rather than force an uninstall, the whole layer
+now has a single master switch that makes every verb a fail-open no-op while
+leaving the code, the board data, and the cron wiring exactly in place.
+
+- **New verbs**: `switch` (report state + what is deciding it), `enable`,
+  `disable`, and `switch toggle`. The switch-management verbs always run, so you
+  can never lock yourself out.
+- **Fail-open no-op when OFF**: every coordination verb short-circuits while
+  preserving its stdout contract — `register` still prints a synthetic id (so
+  `ID=$(… register)` scripts keep working), `claim`/`check` return success/FREE,
+  and `cron-guard` emits empty stdout so the shell guard reads "run unguarded."
+  A disabled board behaves exactly as if coordination were never installed.
+- **Two layers, one decision, identical precedence**: `HERMES_COORD_DISABLED`
+  env override (both directions, one process tree) beats the persistent sentinel
+  file (`~/.hermes/state/coordination_disabled`, override
+  `HERMES_COORD_DISABLED_FILE`) beats the default (ON). `coord_guard.sh` honors
+  the same switch **without spawning Python** (zero cost when off), so disabling
+  instantly makes every cron wrapper run unguarded too — genuinely global.
+- **28-check `selftest_toggle.sh`** proves: OFF never blocks a caller on any
+  verb, ON restores full conflict detection, env overrides the sentinel both
+  ways, and the shell guard honors the switch. The 90 pre-existing checks prove
+  the enabled path is byte-for-byte unchanged. **118 checks total, all green.**
+
+### Added — one-command installer
+
+- **`install.py`** — cross-platform (Linux/macOS/Windows, Python ≥3.8), pure
+  standard library, no network. Copies the CLI + guard + selftests, creates the
+  state dir, and **self-verifies** by running the full selftest matrix (skip with
+  `--no-verify`). `--check` is a dry run; `--dest`/`--state-dir` relocate it.
+- **Never clobbers data**: an existing board DB and a customized
+  `cron_resources.json` are left untouched; a locally-modified script is backed
+  up to `<name>.bak-<ts>` before being replaced. Idempotent — safe to re-run to
+  upgrade in place. Verified end-to-end (live claim survives re-install).
+
+### Added — enrollment examples (were only in the private skill)
+
+- **`examples/bot-soul-coordination.example.md`** and
+  **`examples/subagent-prompt.example.md`** — ready-to-paste protocol texts for
+  concurrent named agents and fan-out children, which inherit no environment and
+  so must learn the protocol from their prompt. The README described this
+  requirement (§3.16) but the repo did not previously ship the texts.
+
+### CI
+
+- `tests` matrix now also runs `selftest_toggle.sh` and an `install.py` smoke
+  test; `lint` now runs ruff + bandit on `install.py` and shellcheck on
+  `selftest_toggle.sh`.
+
 ### Docs
 
+- New README §3.17 (the master switch) + §8 install rewrite leading with
+  `install.py`; command-tour, threat-model, and testing tables updated (90 →
+  118 checks). Enrollment examples linked from §3.16.
 - README §3.16 field note from live deployment: the cron radar surfaces
   *schedules, not run health* — check the store's `last_status`/`failure_streak`
   when a radar entry matters. Concrete trap documented: bot-profile routines

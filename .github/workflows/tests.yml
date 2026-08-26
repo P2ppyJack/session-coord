@@ -32,6 +32,10 @@ jobs:
         run: bash scripts/selftest_priority.sh
       - name: v2.1 cron-leg + v2.2 bot-leg suite (45 checks)
         run: bash scripts/selftest_cron.sh
+      - name: v2.3 master-switch toggle suite (28 checks)
+        run: bash scripts/selftest_toggle.sh
+      - name: installer smoke test (install + self-verify into a scratch home)
+        run: python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state"
 
   lint:
     runs-on: ubuntu-latest
@@ -41,8 +45,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: bandit (security)
-        run: pipx run bandit scripts/session_coord.py
+        run: pipx run bandit scripts/session_coord.py install.py
       - name: ruff (strict profile, line-length 100)
-        run: pipx run ruff check --select E,F,W,I,UP,SIM,ISC,RUF,B --line-length 100 scripts/session_coord.py
-      - name: shellcheck (guard + wrappers)
-        run: shellcheck scripts/coord_guard.sh examples/wrapper.example.sh
+        run: pipx run ruff check --select E,F,W,I,UP,SIM,ISC,RUF,B --line-length 100 scripts/session_coord.py install.py
+      - name: shellcheck (guard + wrappers + selftests)
+        run: shellcheck scripts/coord_guard.sh examples/wrapper.example.sh scripts/selftest_toggle.sh

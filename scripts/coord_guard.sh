@@ -28,6 +28,25 @@
 COORD_SC="${COORD_SC:-$HOME/.hermes/scripts/session_coord.py}"
 COORD_GUARD_ID=""
 
+# Master switch, honored WITHOUT spawning Python (zero-cost when OFF). Must
+# match coordination_enabled() in session_coord.py exactly: env
+# HERMES_COORD_DISABLED (truthy=off, 0/false/no/off=on) overrides the sentinel
+# file; absent both -> enabled.
+COORD_DISABLED_FILE="${HERMES_COORD_DISABLED_FILE:-$HOME/.hermes/state/coordination_disabled}"
+
+_coord_disabled() {
+  # rc 0 = coordination is OFF; rc 1 = ON.
+  local e
+  if [ -n "${HERMES_COORD_DISABLED:-}" ]; then
+    e=$(printf '%s' "$HERMES_COORD_DISABLED" | tr '[:upper:]' '[:lower:]')
+    case "$e" in
+      0|false|no|off) return 1 ;;   # explicitly ON
+      *)              return 0 ;;   # any other non-empty value -> OFF
+    esac
+  fi
+  [ -f "$COORD_DISABLED_FILE" ]      # sentinel present -> OFF
+}
+
 coord_done() {
   [ -n "${COORD_GUARD_ID:-}" ] || return 0
   python3 "$COORD_SC" "done" --id "$COORD_GUARD_ID" >/dev/null 2>&1 || true
@@ -36,6 +55,7 @@ coord_done() {
 
 coord_guard() {
   local job="$1" policy="${2:-wait}" timeout="${3:-900}" ttl="${4:-90}" rc=0 out=""
+  if _coord_disabled; then COORD_GUARD_ID=""; return 0; fi  # master switch OFF -> run unguarded
   [ -f "$COORD_SC" ] || { COORD_GUARD_ID=""; return 0; }   # no board -> fail open
   # stdout = guard session id (only); stderr = human chatter (let it flow to
   # the caller's stderr/log for forensics).

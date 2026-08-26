@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
+# 2026-08-26 | claude-opus-4-8 | anthropic | desktop session | MASTER SWITCH: whole coordination layer can be turned OFF without uninstalling — `enable`/`disable`/`switch [on|off|toggle]` verbs (persistent sentinel ~/.hermes/state/coordination_disabled; env HERMES_COORD_DISABLED overrides both directions). While OFF every verb is a fail-open no-op (register still prints a synthetic 12-hex id, claim/check succeed FREE, cron-guard stdout stays empty) so a disabled board == "not installed"; switch verbs themselves always run. coordination_enabled()/switch_source() helpers; main() gate short-circuits to disabled_noop(). Mirrors coord_guard.sh _coord_disabled(). 90/90 existing checks still green (enabled path byte-identical) + selftest_toggle.sh 28 new checks.  # noqa: E501
 # 2026-08-18 | claude-fable-5 | anthropic | desktop session | v2.2 Bot Mode integration: cron_store_jobs() now merges EVERY profile store (~/.hermes/profiles/*/cron/jobs.json — a Bot Mode bot IS a profile; its Routines live in its own store) with the default store (id collision: default wins); profile jobs get a "[bot:<profile>]" name tag surfaced through radar/advisories/guard/wait-for-cron; upcoming_cron_conflicts + status rows carry "profile"; resolve_cron_job error names both store locations; HERMES_COORD_PROFILES_DIR override for tests  # noqa: E501
 # 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2.1 cron leg: cron-guard verb (deterministic wrapper for cron scripts: register ephemeral cron session + atomic claim; --policy skip|wait; stdout carries ONLY the coordination id so no_agent stdout-as-message semantics survive; holders get a cron_defer note on skip), cron manifest advisory (~/.hermes/state/cron_resources.json + jobs.json next_run_at -> "cron fires in ~Nm on this resource" warnings on claim/check/status; advisory only, never blocks), cron-aware verbs (HELD labels cron holders, preempt refuses vs crons — they cannot checkpoint/pause; wait or user-approved steal)  # noqa: E501
 # 2026-08-16 | claude-fable-5 | anthropic | desktop session | v2: user-set priority ranks (1,2,3 + reorder), subagent lineage ranks (1a/1b via --parent/--slot, computed live so re-ranking a parent re-ranks its children), preempt protocol (user-priority request -> holder checkpoints+pauses -> auto-queued resume), pause/resume verbs, queue fencing (rank order + FIFO enforced on contended resources, liveness-gated), preempt alerts on every board touch, idempotent schema migration from v1. All v1 commands/outputs byte-compatible (19-test regression suite).  # noqa: E501
@@ -162,6 +163,23 @@ POLL_FRESH_S = 30               # a waiter fences only while actively polling
 INF = float("inf")
 PAUSE_NOTE = "PAUSED-RESUME"
 
+# --- master switch --------------------------------------------------------
+# The whole coordination layer can be turned OFF without uninstalling it.
+# Precedence (this CLI and the shell cron guard honor it identically):
+#   1. env HERMES_COORD_DISABLED -- explicit override in BOTH directions
+#      (truthy -> OFF; 0/false/no/off -> ON), for one-shot/session/test use.
+#   2. sentinel file (HERMES_COORD_DISABLED_FILE, default below) -- the
+#      persistent switch set by the `disable`/`enable`/`switch` verbs.
+#   3. default: ENABLED.
+# OFF = every verb is a friendly no-op that never blocks a caller (register
+# still prints a synthetic id; claim/check/cron-guard return success/free), so
+# a disabled board behaves exactly like "no coordination installed".
+COORD_DISABLED_FILE = os.path.expanduser(
+    os.environ.get("HERMES_COORD_DISABLED_FILE",
+                   "~/.hermes/state/coordination_disabled")
+)
+_SWITCH_FALSY = {"0", "false", "no", "off"}
+
 # --- cron awareness -------------------------------------------------------
 # Manifest of scheduled jobs' declared resources (advisory heads-up for
 # sessions + resolution source for cron-guard --job). Optional; absence
@@ -258,6 +276,26 @@ def age_str(ts):
     if s < 3600:
         return f"{s // 60}m"
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def coordination_enabled():
+    """Master switch state. env HERMES_COORD_DISABLED (explicit, both
+    directions) overrides the sentinel file; absent both -> enabled. Kept in
+    lock-step with _coord_disabled() in coord_guard.sh -- change both together."""
+    env = os.environ.get("HERMES_COORD_DISABLED")
+    if env is not None and env.strip():
+        return env.strip().lower() in _SWITCH_FALSY
+    return not os.path.exists(COORD_DISABLED_FILE)
+
+
+def switch_source():
+    """Human explanation of what is currently deciding the master switch."""
+    env = os.environ.get("HERMES_COORD_DISABLED")
+    if env is not None and env.strip():
+        return f"env HERMES_COORD_DISABLED={env.strip()!r}"
+    if os.path.exists(COORD_DISABLED_FILE):
+        return f"sentinel file {COORD_DISABLED_FILE}"
+    return "default (enabled)"
 
 
 # ---------------------------------------------------------------- ranks
@@ -1847,6 +1885,120 @@ def cmd_cron_note(a):
     return 0
 
 
+# ---------------------------------------------------------------- master switch
+
+def _synthetic_id():
+    """A throwaway 12-hex id shaped like a real one, so `ID=$(... register)`
+    still yields something callers can carry around while coordination is OFF."""
+    return uuid.uuid4().hex[:12]
+
+
+# Verbs that manage or read the switch itself always run, even while OFF.
+_SWITCH_VERBS = {"switch", "enable", "disable"}
+
+
+def disabled_noop(a):
+    """Friendly no-op for every coordination verb while the master switch is
+    OFF. It never blocks a caller and preserves each verb's stdout contract, so
+    a disabled board behaves exactly like 'coordination not installed'. Return
+    code is always 0 (proceed) -- OFF must never turn into a blocked caller."""
+    cmd = a.cmd
+    j = getattr(a, "json", False)
+    note = (f"coordination DISABLED ({switch_source()}) -- no-op; "
+            f"run 'session_coord.py enable' to turn it back on")
+    if cmd == "register":
+        sid = _synthetic_id()
+        emit({"id": sid, "disabled": True}, j, [sid])
+        if not j:
+            print(f"# {note}", file=sys.stderr)
+        return 0
+    if cmd == "cron-guard":
+        # stdout MUST stay empty: the shell guard reads stdout as the guard id
+        # and treats empty/non-hex output as fail-open (proceed unguarded).
+        print(f"cron-guard: {note}", file=sys.stderr)
+        return 0
+    if cmd == "claim":
+        emit({"claimed": True, "disabled": True}, j,
+             ["CLAIMED (coordination disabled -- no board enforcement)"])
+        return 0
+    if cmd == "check":
+        emit({"free": True, "disabled": True}, j, ["FREE (coordination disabled)"])
+        return 0
+    if cmd == "status":
+        emit({"disabled": True, "source": switch_source()}, j,
+             ["coordination board: DISABLED",
+              f"  reason: {switch_source()}",
+              "  re-enable with: session_coord.py enable"])
+        return 0
+    # wait / release / done / inbox / prioritize / preempt / pause / resume /
+    # steal / wait-for-cron / cron-note: nothing to do -- succeed quietly.
+    if j:
+        emit({"disabled": True, "noop": cmd}, j, [])
+    else:
+        print(f"# {note}", file=sys.stderr)
+    return 0
+
+
+def cmd_switch(a):
+    """Read or set the master switch. `enable`/`disable` set it persistently via
+    a sentinel file (COORD_DISABLED_FILE); `switch` alone reports; `switch
+    on|off|toggle` also sets it. The env var HERMES_COORD_DISABLED, when set,
+    overrides the file for its process tree and is reported honestly."""
+    arg = getattr(a, "state", None)
+    if a.cmd == "enable" or arg in ("on", "enable"):
+        want = True
+    elif a.cmd == "disable" or arg in ("off", "disable"):
+        want = False
+    elif arg == "toggle":
+        want = not coordination_enabled()
+    else:  # 'status' or no argument -> report only
+        want = None
+
+    env = os.environ.get("HERMES_COORD_DISABLED")
+    env_str = (env or "").strip()
+    env_forcing = env_str != ""
+
+    if want is None:
+        present = "present" if os.path.exists(COORD_DISABLED_FILE) else "absent"
+        state = "ENABLED" if coordination_enabled() else "DISABLED"
+        lines = [f"coordination: {state}",
+                 f"  decided by: {switch_source()}",
+                 f"  sentinel:   {COORD_DISABLED_FILE} ({present})"]
+        if env_forcing:
+            lines.append(f"  NOTE: env HERMES_COORD_DISABLED={env_str!r} "
+                         "overrides the sentinel for this process tree.")
+        emit({"enabled": coordination_enabled(), "source": switch_source(),
+              "sentinel": COORD_DISABLED_FILE,
+              "sentinel_present": os.path.exists(COORD_DISABLED_FILE)}, a.json, lines)
+        return 0
+
+    if want:  # enable -> remove the sentinel
+        try:
+            os.remove(COORD_DISABLED_FILE)
+            changed = True
+        except FileNotFoundError:
+            changed = False
+    else:     # disable -> write the sentinel
+        d = os.path.dirname(COORD_DISABLED_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        changed = not os.path.exists(COORD_DISABLED_FILE)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(COORD_DISABLED_FILE, "w", encoding="utf-8") as f:
+            f.write(f"coordination disabled at {int(now())} ({stamp})\n")
+
+    now_enabled = coordination_enabled()
+    tail = "" if changed else " (already in that state)"
+    lines = [f"coordination {'ENABLED' if want else 'DISABLED'}{tail}",
+             f"  effective now: {'ENABLED' if now_enabled else 'DISABLED'} ({switch_source()})"]
+    if env_forcing and now_enabled != want:
+        lines.append(f"  WARNING: env HERMES_COORD_DISABLED={env_str!r} is "
+                     "OVERRIDING the sentinel -- unset it for the file to take effect.")
+    emit({"enabled": now_enabled, "requested": want, "changed": changed,
+          "source": switch_source()}, a.json, lines)
+    return 0
+
+
 def main():
     """CLI entrypoint: build the argparse tree and dispatch to cmd_*."""
     p = argparse.ArgumentParser(description=__doc__,
@@ -1996,7 +2148,30 @@ def main():
     sp.add_argument("--reason", default=None)
     sp.set_defaults(fn=cmd_cron_note)
 
+    sp = sub.add_parser("switch",
+                        help="MASTER SWITCH: report state, or on|off|toggle the whole board")
+    sp.add_argument("state", nargs="?",
+                    choices=["on", "off", "toggle", "status"], default=None,
+                    help="omit to report; on/off/toggle to set persistently")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_switch)
+
+    sp = sub.add_parser("enable",
+                        help="MASTER SWITCH: turn the coordination board ON (persistent)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_switch)
+
+    sp = sub.add_parser("disable",
+                        help="MASTER SWITCH: turn the board OFF — every verb becomes a "
+                             "fail-open no-op (persistent)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_switch)
+
     a = p.parse_args()
+    # Master switch: while OFF, every coordination verb (but not the switch-
+    # management verbs themselves) short-circuits to a fail-open no-op.
+    if a.cmd not in _SWITCH_VERBS and not coordination_enabled():
+        sys.exit(disabled_noop(a))
     try:
         sys.exit(a.fn(a))
     except sqlite3.OperationalError as e:
