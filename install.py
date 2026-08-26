@@ -16,7 +16,9 @@ What it does
    Any script it replaces whose contents differ is backed up to
    <name>.bak-<timestamp> first, so a local modification is never lost silently.
 4. Verifies the install by running the bundled selftest suites (skip with
-   --no-verify). A install that cannot prove itself is not an install.
+   --no-verify) through a real bash. On a machine with no working bash it
+   says so and skips verification rather than failing — the files are still
+   installed; a POSIX shell is only needed to PROVE them.
 
 Nothing runs in the background; there is no daemon and no uninstall step beyond
 deleting the copied files (your data dir is yours).
@@ -116,10 +118,66 @@ def seed_manifest(state_dir: Path, *, do_seed: bool, dry: bool) -> str:
     return "seeded from example (edit it to match YOUR crons)"
 
 
+def find_bash():
+    """Return the path to a *working* bash, or None.
+
+    On Windows, PATH usually surfaces the WSL launcher stub
+    (C:\\Windows\\System32\\bash.exe); with no distro installed it prints a
+    "use wsl.exe --install" notice and exits non-zero, so it cannot run our
+    POSIX selftests (this is exactly what reddened Windows CI once). Git for
+    Windows ships a real bash, so we add it as a candidate (derived from the
+    git executable and the usual install roots) and PROBE every candidate --
+    only a bash that actually echoes our marker is accepted. Returns the first
+    that works, else None.
+    """
+    candidates = []
+    for var in ("COORD_BASH", "BASH"):
+        v = os.environ.get(var)
+        if v:
+            candidates.append(v)
+    which = shutil.which("bash")
+    if which:
+        candidates.append(which)
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            root = Path(git).resolve().parent.parent  # ...\\Git\\cmd\\git.exe -> ...\\Git
+            candidates.append(str(root / "bin" / "bash.exe"))
+            candidates.append(str(root / "usr" / "bin" / "bash.exe"))
+        for env_var in ("PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(str(Path(base) / "Git" / "bin" / "bash.exe"))
+    seen = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            probe = subprocess.run(  # nosec B603 B607 -- probing a discovered bash, fixed argv
+                [cand, "-c", "echo __coord_bash_ok__"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0 and "__coord_bash_ok__" in (probe.stdout or ""):
+            return cand
+    return None
+
+
 def run_suites(dest_dir: Path) -> int:
     """Run every selftest suite against the freshly installed copy. Each suite
     is self-contained (scratch DBs in a temp dir), so this is side-effect free
-    for the real board. Returns process-style rc (0 = all green)."""
+    for the real board. Returns process-style rc (0 = all green, or a graceful
+    skip when the machine has no bash to run POSIX scripts)."""
+    bash = find_bash()
+    if bash is None:
+        print("  [skip] no working bash on this machine — POSIX selftests can't")
+        print("         self-run here. The files ARE installed; prove them in")
+        print("         Git Bash or WSL:")
+        for suite in SUITES:
+            print(f"           bash {dest_dir / suite}")
+        return 0
     sc = dest_dir / "session_coord.py"
     guard = dest_dir / "coord_guard.sh"
     env = dict(os.environ, SC=str(sc), GUARD=str(guard), COORD_SC=str(sc))
@@ -130,8 +188,8 @@ def run_suites(dest_dir: Path) -> int:
             print(f"  ! {suite}: not installed, cannot verify")
             failed.append(suite)
             continue
-        proc = subprocess.run(  # nosec B603 B607 -- fixed argv; 'bash' via PATH is intentional for cross-platform (Git-Bash on Windows)
-            ["bash", str(path)], env=env, capture_output=True, text=True
+        proc = subprocess.run(  # nosec B603 B607 -- discovered bash + fixed argv, no shell
+            [bash, str(path)], env=env, capture_output=True, text=True
         )
         last = (proc.stdout.strip().splitlines() or ["(no output)"])[-1]
         mark = "ok " if proc.returncode == 0 else "FAIL"
