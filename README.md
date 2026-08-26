@@ -541,6 +541,7 @@ cp scripts/session_coord.py scripts/coord_guard.sh ~/.hermes/scripts/
 
 # 2. A session's lifecycle
 SID=$(python3 session_coord.py register --task "refactor helper lib" --surface desktop)
+#    (or pre-mint a memorable id: register --id my-task-2026 … / export HERMES_COORD_ID=my-task-2026)
 python3 session_coord.py claim  --id "$SID" --res file:~/project/lib --res skill:my-skill
 #   ... work ...
 python3 session_coord.py done   --id "$SID"       # release everything, notify waiters
