@@ -115,6 +115,22 @@ ck "no-match id errors loudly (rc 2)" 2 $RC "no session matches" "$OUT"
 OUT=$($PY $SC "done" --id "$SHORT"); RC=$?
 ck "done via 8-char prefix deregisters the real session" 0 $RC "DONE" "$OUT"
 
+# --- 14. explicit ids (v2.3.2): register --id, idempotent re-register,
+#         claim-auto-register orphan-proofing, invalid id rejection
+OUT=$($PY $SC register --id explicit-id-test-0826 --task "explicit id task" --surface test); RC=$?
+ck "register --id uses the caller's id" 0 $RC "explicit-id-test-0826" "$OUT"
+$PY $SC claim --id explicit-id-test-0826 --res "res:explid" --task "hold" >/dev/null
+OUT=$($PY $SC release --id explicit-id-test-0826 --all); RC=$?
+ck "release resolves the explicit id (orphan bug fixed)" 0 $RC "RELEASED: res:explid" "$OUT"
+OUT=$($PY $SC register --id explicit-id-test-0826 --task "re-registered task"); RC=$?
+ck "re-register same explicit id is idempotent" 0 $RC "explicit-id-test-0826" "$OUT"
+OUT=$($PY $SC register --id "bad id!" --task "nope" 2>&1); RC=$?
+ck "invalid explicit id rejected rc 2" 2 $RC "invalid" "$OUT"
+OUT=$($PY $SC claim --id never-registered-xyz --res "res:orphanproof" --task "orphan probe" >/dev/null; $PY $SC release --id never-registered-xyz --all); RC=$?
+ck "claim auto-registers unknown id -> releasable" 0 $RC "RELEASED: res:orphanproof" "$OUT"
+$PY $SC "done" --id explicit-id-test-0826 >/dev/null 2>&1
+$PY $SC "done" --id never-registered-xyz >/dev/null 2>&1
+
 echo; echo "RESULT: $pass passed, $fail failed"
 rm -f /tmp/bwait_$$.out /tmp/bwait_$$.rc /tmp/race_$$.out "$HERMES_COORD_DB"* 2>/dev/null || true
 exit $fail

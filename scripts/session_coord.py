@@ -832,9 +832,19 @@ def cron_advisory_lines(resources, horizon_s=CRON_ADVISORY_S, ttl_min=None):
 # ---------------------------------------------------------------- commands
 
 def cmd_register(a):
-    """Verb: announce this session on the board; print id + co-workers."""
+    """Verb: announce this session on the board; print id + co-workers.
+    --id (or env HERMES_COORD_ID) registers under an EXPLICIT id — callers that
+    pre-mint a memorable id get a real session row, so later release/done
+    resolve it (pre-v2.3.2 the flag did not exist; claims made under a
+    caller-minted id were orphaned until TTL). Explicit-id re-register is
+    idempotent: refreshes task/surface/liveness and reactivates a done row."""
     conn = db()
-    sid = uuid.uuid4().hex[:12]
+    explicit = (getattr(a, "id", None) or "").strip()
+    if explicit and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{3,63}$", explicit):
+        print(f"error: --id '{explicit}' invalid (4-64 chars: alnum . _ -, "
+              "must start alphanumeric)", file=sys.stderr)
+        return 2
+    sid = explicit or uuid.uuid4().hex[:12]
     parent_id = None
     if a.parent:
         parent_id, err = resolve_session(conn, a.parent)
@@ -849,14 +859,23 @@ def cmd_register(a):
         return 1
     conn.execute("BEGIN IMMEDIATE")
     reap(conn)
-    conn.execute(
-        "INSERT INTO sessions(id,task,surface,started_at,last_seen,priority,parent_id,"
-        "slot,rank_set_at) VALUES(?,?,?,?,?,?,?,?,?)",
-        (sid, a.task, a.surface, now(), now(),
-         (a.rank.strip().lower() if a.rank else None), parent_id,
-         (a.slot.strip().lower() if a.slot else None),
-         now() if a.rank else None),
-    )
+    existing = conn.execute(
+        "SELECT id FROM sessions WHERE id=?", (sid,)).fetchone() if explicit else None
+    if existing:
+        # idempotent re-register: refresh task/surface/liveness, reactivate
+        conn.execute(
+            "UPDATE sessions SET task=?, surface=COALESCE(?,surface), "
+            "status='active', paused=0, last_seen=? WHERE id=?",
+            (a.task, a.surface, now(), sid))
+    else:
+        conn.execute(
+            "INSERT INTO sessions(id,task,surface,started_at,last_seen,priority,parent_id,"
+            "slot,rank_set_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (sid, a.task, a.surface, now(), now(),
+             (a.rank.strip().lower() if a.rank else None), parent_id,
+             (a.slot.strip().lower() if a.slot else None),
+             now() if a.rank else None),
+        )
     conn.execute("COMMIT")
     my_r = rank_str(eff_rank(conn, sid))
     others = conn.execute(
@@ -1039,6 +1058,16 @@ def cmd_claim(a):
         print("error: --id required (or set HERMES_COORD_ID)", file=sys.stderr)
         return 1
     conn = db()
+    # Orphan-proofing (v2.3.2): a claim under an id that was never registered
+    # auto-creates a minimal session row, so release/done can always resolve
+    # the id later. Claims must never be easier to make than to release.
+    if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (a.id,)).fetchone():
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions(id,task,surface,started_at,last_seen) "
+            "VALUES(?,?,?,?,?)",
+            (a.id, a.task or "(auto-registered at claim)", None, now(), now()))
+        conn.execute("COMMIT")
     resources = [norm_resource(r) for r in a.res]
     task = a.task or (conn.execute(
         "SELECT task FROM sessions WHERE id=?", (a.id,)).fetchone() or {"task": None})["task"]
@@ -1917,7 +1946,7 @@ def disabled_noop(a):
     note = (f"coordination DISABLED ({switch_source()}) -- no-op; "
             f"run 'session_coord.py enable' to turn it back on")
     if cmd == "register":
-        sid = _synthetic_id()
+        sid = (getattr(a, "id", None) or "").strip() or _synthetic_id()
         emit({"id": sid, "disabled": True}, j, [sid])
         if not j:
             print(f"# {note}", file=sys.stderr)
@@ -2026,6 +2055,9 @@ def main():
             sp.add_argument("--mode", choices=["exclusive", "shared"], default="exclusive")
 
     sp = sub.add_parser("register", help="announce this session + its task")
+    sp.add_argument("--id", default=os.environ.get("HERMES_COORD_ID"),
+                    help="explicit session id to register under (or env "
+                         "HERMES_COORD_ID); omit for an auto-generated one")
     sp.add_argument("--task", required=True)
     sp.add_argument("--surface", default=None, help="desktop/cli/telegram/cron/subagent/...")
     sp.add_argument("--parent", default=None,

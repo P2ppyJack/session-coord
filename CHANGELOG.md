@@ -5,6 +5,31 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-08-26
+
+### Fixed — explicit session ids: registerable, and never orphaned
+
+`register` accepted no `--id`, yet `claim`/`release` did — so a caller that
+pre-minted a memorable id (`HERMES_COORD_ID=my-task-id`) hit a usage error on
+`register` (easily missed with stderr suppressed), then **successfully
+claimed** under that id anyway. The claims were orphans: `release --id`/`done
+--id` refused with `no session matches`, and the resources stayed held until
+TTL expiry. Claims must never be easier to make than to release. Two-sided fix:
+
+- `register --id <explicit>` (default: env `HERMES_COORD_ID`) registers under
+  the **caller's** id. Ids are validated (`4-64 chars: alnum . _ -`, alnum
+  first; rc 2 on violation). Re-registering an existing explicit id is
+  **idempotent** — refreshes task/surface/liveness and reactivates a `done`
+  row instead of erroring. Auto-generated ids are unchanged when `--id` is
+  omitted. Disabled-mode (master switch OFF) `register` echoes the explicit id
+  so `ID=$(… register)` pipelines stay stable either way.
+- **Orphan-proofing at the claim side:** a `claim` under a never-registered id
+  auto-creates a minimal session row (`(auto-registered at claim)`), so every
+  claimable id is guaranteed resolvable by `release`/`done` later — even if
+  the caller skipped or fumbled `register`.
+
+`selftest.sh` gains 5 checks (23 → 28; **127 total**).
+
 ## [2.3.1] — 2026-08-26
 
 ### Fixed — `--id` now resolves prefixes and fails loudly
