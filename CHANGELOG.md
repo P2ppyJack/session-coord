@@ -5,6 +5,21 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-08-26
+
+### Fixed — `--id` now resolves prefixes and fails loudly
+
+The board *displays* 8-character session ids but *stores* the full 12, so
+pasting a displayed id into `done`/`release`/`pause`/`resume`/`preempt`/`inbox`
+ran `... WHERE id=?` against a value that matched **no row** — the command
+printed its normal success line while changing nothing (a held claim silently
+survived a `release`). These verbs now resolve `--id` up front to a real session
+by full id **or unique prefix** (reusing the same resolver `prioritize` already
+used), and **exit non-zero** on a no-match (`error: no session matches '…'`) or
+an ambiguous prefix (`error: ambiguous prefix '…': …`). `register` (mints a new
+id) and the read/self-attributed `claim`/`check`/`wait` verbs are deliberately
+exempt. `selftest.sh` gains 4 checks (19 → 23; **122 total**).
+
 ## [2.3.0] — 2026-08-26
 
 ### Added — master switch (turn coordination off without uninstalling)

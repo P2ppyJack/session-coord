@@ -1896,6 +1896,16 @@ def _synthetic_id():
 # Verbs that manage or read the switch itself always run, even while OFF.
 _SWITCH_VERBS = {"switch", "enable", "disable"}
 
+# Verbs that ACT ON AN EXISTING session addressed by --id. Their SQL is
+# `WHERE id=?`/`session_id=?`, so a mistyped or truncated id matches no row and
+# the UPDATE/SELECT silently affects nothing while the verb still reports
+# success (the classic silent-no-op). Resolving --id up front — full id or
+# unique prefix (>=4 chars), erroring on no-match/ambiguous — turns that quiet
+# lie into an honest failure. Excluded on purpose: `register` (mints a NEW id),
+# and `claim`/`check`/`wait` (read-side / self-attributed; a not-yet-registered
+# id is legitimate there and must not hard-error).
+_ID_RESOLVING_VERBS = {"release", "done", "inbox", "pause", "resume", "preempt"}
+
 
 def disabled_noop(a):
     """Friendly no-op for every coordination verb while the master switch is
@@ -2172,6 +2182,22 @@ def main():
     # management verbs themselves) short-circuits to a fail-open no-op.
     if a.cmd not in _SWITCH_VERBS and not coordination_enabled():
         sys.exit(disabled_noop(a))
+    # Resolve --id (full id OR unique prefix) to a real session for the verbs
+    # that act on one, so a truncated/typo'd id fails loudly instead of matching
+    # nothing and reporting success. The board DISPLAYS 8-char ids but stores
+    # 12, which is exactly how an operator ends up pasting a short id.
+    if a.cmd in _ID_RESOLVING_VERBS and getattr(a, "id", None):
+        try:
+            rconn = db()
+            sid, err = resolve_session(rconn, a.id)
+            rconn.close()
+        except sqlite3.OperationalError:
+            sid, err = None, None  # DB down: fail open, let the verb's own guard handle it
+        if err:
+            print(f"error: {err}", file=sys.stderr)
+            sys.exit(2)
+        if sid:
+            a.id = sid
     try:
         sys.exit(a.fn(a))
     except sqlite3.OperationalError as e:

@@ -102,6 +102,19 @@ ck "steal force-releases" 0 $RC "FORCE-RELEASED" "$OUT"
 OUT=$($PY $SC inbox --id $S2)
 ck "victim notified of steal + reason" 0 $? "confirmed dead" "$OUT"
 
+# --- 13. id resolution: 8-char prefix works; no-match & ambiguous fail loudly (v2.3.1)
+P1=$($PY $SC register --task "prefix target" --surface test | head -1)
+$PY $SC claim --id $P1 --res "res:prefixfix" --task "holding for prefix test" >/dev/null
+SHORT=${P1:0:8}
+OUT=$($PY $SC release --id "$SHORT" --all); RC=$?
+ck "8-char prefix release actually releases" 0 $RC "RELEASED" "$OUT"
+OUT=$($PY $SC check --id $P1 --res "res:prefixfix"); RC=$?
+ck "prefix release really freed the resource (not a fake success)" 0 $RC "FREE" "$OUT"
+OUT=$($PY $SC "done" --id "zzzznope" 2>&1); RC=$?
+ck "no-match id errors loudly (rc 2)" 2 $RC "no session matches" "$OUT"
+OUT=$($PY $SC "done" --id "$SHORT"); RC=$?
+ck "done via 8-char prefix deregisters the real session" 0 $RC "DONE" "$OUT"
+
 echo; echo "RESULT: $pass passed, $fail failed"
 rm -f /tmp/bwait_$$.out /tmp/bwait_$$.rc /tmp/race_$$.out "$HERMES_COORD_DB"* 2>/dev/null || true
 exit $fail

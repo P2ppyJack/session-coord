@@ -464,16 +464,16 @@ actors. They compose: single-flight guards re-entrancy, the board guards intent.
 Everything below ships in the repo (`scripts/selftest*.sh`) and is re-runnable in one
 command each; nothing is claimed that a clone cannot re-verify.
 
-**Regression / compatibility / feature suites — 118 checks, all green:**
+**Regression / compatibility / feature suites — 122 checks, all green:**
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `selftest.sh` (v1 regression) | 19 | Original claim/wait/release/steal/expiry semantics unchanged |
+| `selftest.sh` (v1 regression) | 23 | Original claim/wait/release/steal/expiry semantics unchanged, plus **id resolution: an 8-char board-display prefix really acts on its session, and a no-match / ambiguous id fails loudly instead of a silent no-op (v2.3.1)** |
 | `selftest_priority.sh` (v2) | 26 | Ranks, fencing, FIFO, lineage, pause/resume, preempt dedupe, urgent alerts, **pinned v1-schema fixture migration** |
 | `selftest_cron.sh` (v2.1+v2.2) | 45 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness** |
 | `selftest_toggle.sh` (v2.3) | 28 | **Master switch**: OFF is a fail-open no-op on every verb (register still yields an id, cron-guard stdout stays empty), ON restores conflict detection, env overrides the sentinel both directions, and the shell guard honors the switch — plus the enabled path proven unchanged by the 90 checks above |
 
-**Platforms actually executed, not assumed:** the full 118-check matrix runs green on
+**Platforms actually executed, not assumed:** the full 122-check matrix runs green on
 macOS (Apple Silicon) and Ubuntu Linux (byte-identical file verified by checksum before
 the run). The CLI was additionally executed under real Python 3.8, 3.9, 3.11, 3.12, and
 3.13 interpreters. Hostile-console behavior (C locale / `PYTHONIOENCODING=ascii` with
