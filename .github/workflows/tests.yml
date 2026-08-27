@@ -36,6 +36,13 @@ jobs:
         run: bash scripts/selftest_toggle.sh
       - name: installer smoke test (install + self-verify into a scratch home)
         run: python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state"
+      - name: installer wiring is idempotent (re-run + exactly one marker)
+        run: |
+          MEM="$RUNNER_TEMP/coord-mem/MEMORY.md"
+          mkdir -p "$(dirname "$MEM")"
+          python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$MEM"
+          python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$MEM"
+          [ "$(grep -c 'session-coord (wire v1)' "$MEM")" -eq 1 ]
 
   lint:
     runs-on: ubuntu-latest

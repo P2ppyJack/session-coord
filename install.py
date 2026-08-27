@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# EDIT HISTORY (newest first)
+# 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN STEP: default ON appends the canonical standing memory entry ("session-coord (wire v1)" marker) to the agent memory store (default <HERMES_HOME|~/.hermes>/memories/MEMORY.md; --memory-file override; --no-wire-memory opt-out). Idempotent marker check, .bak-<ts> backup before append, store created only when the memories/ parent already exists, fail-open (absent/unwritable store prints the entry for manual placement, never fails the install); entry text format()s the real --dest script path. run_suites scrubs HERMES_COORD_ID from the verify env (v2.3.2 register/claim honor it as default --id — a caller's exported id made every suite self-collide on the live board). CI smoke test extended: re-run + exactly-one-marker assertion.  # noqa: E501
 """install.py — set up (or upgrade) session-coord on this machine.
 
 Pure standard library, no network, cross-platform (Linux / macOS / Windows,
@@ -19,6 +21,14 @@ What it does
    --no-verify) through a real bash. On a machine with no working bash it
    says so and skips verification rather than failing — the files are still
    installed; a POSIX shell is only needed to PROVE them.
+5. Wires the agent in: appends the canonical standing memory rule
+   ("always consult the coordination board", marker `session-coord (wire
+   v1)`) to the agent memory store (default:
+   <HERMES_HOME|~/.hermes>/memories/MEMORY.md; --memory-file overrides;
+   --no-wire-memory skips). Idempotent (marker check → re-runs are no-ops),
+   backed up (.bak-<ts>) before any append, and fail-open: an absent or
+   unwritable store prints the entry for manual placement and never fails
+   the install.
 
 Nothing runs in the background; there is no daemon and no uninstall step beyond
 deleting the copied files (your data dir is yours).
@@ -52,6 +62,77 @@ SUITES = ["selftest.sh", "selftest_priority.sh", "selftest_cron.sh", "selftest_t
 
 # Data files this installer must NEVER overwrite (they hold live state).
 PROTECTED = ("session_coordination.db", "cron_resources.json")
+
+# Idempotency marker for the standing memory entry. The phrase is part of
+# the entry itself; a re-run (or an upgrade, or a re-paste) that finds it in
+# the store skips instead of duplicating. Keep it byte-stable.
+WIRE_MARKER = "session-coord (wire v1)"
+
+# The canonical standing memory rule. Kept as a single line — memory stores
+# separate entries by blank/§ delimiters, and one line is what a wrapping
+# paste cannot mangle. {sc} is substituted at write time with the absolute
+# path of the installed CLI, so the rule always names the real script.
+WIRE_ENTRY = (
+    "STANDING RULE — session-coord (wire v1): ALWAYS deconflict via the "
+    "coordination board before touching shared resources (files, skills, "
+    "memory, cron store, remote boxes, desktop UI) — any concurrent "
+    "session/bot/cron may be mid-task. First: `python3 {sc} status`. Then "
+    "register once (`ID=$(python3 {sc} register --task '...')`); claim "
+    "before writes (`python3 {sc} claim --id $ID --res <keys> --wait`); "
+    "`python3 {sc} done --id $ID` at task end. Full protocol: skill "
+    "multi-session-coordination. Off-switch: `python3 {sc} disable`."
+)
+
+
+def _memory_append_text(content: str, entry: str) -> str:
+    """Append an entry to Hermes memory-store text, byte-faithful to the
+    store's own writer (memory_tool.py: entries joined by \\n§\\n, trailing
+    newlines stripped — the reader splits on \\n§\\n, so a glued entry would
+    inherit the previous entry)."""
+    content = content.rstrip("\n")
+    if not content:
+        return entry
+    return content + "\n§\n" + entry
+
+
+def wire_memory(memory_file: Path, sc: Path, *, dry: bool) -> str:
+    """Append the standing coordination rule to the agent's memory store.
+
+    Idempotent (marker byte-check), append-only, backed up first, and
+    fail-open (Rule 2): an absent store with no memories/ parent — or an
+    unwritable one — returns a "NOT WIRED" status naming the manual path and
+    never raises, so the install cannot fail on the wiring step. A store
+    whose parent directory exists (a real agent profile) IS created, since
+    that is the fresh-profile case the wiring exists for. Returns a
+    one-line status for the install summary.
+    """
+    entry = WIRE_ENTRY.format(sc=sc)
+    try:
+        if memory_file.exists():
+            content = memory_file.read_text(encoding="utf-8")
+            if WIRE_MARKER in content:
+                return "wired (already present — idempotent skip)"
+            if dry:
+                return f"would append the rule to {memory_file}"
+            bak = memory_file.with_name(f"{memory_file.name}.bak-{stamp()}")
+            shutil.copy2(memory_file, bak)
+            memory_file.write_text(_memory_append_text(content, entry),
+                                   encoding="utf-8")
+            return f"wired (appended; previous copy -> {bak.name})"
+        if memory_file.parent.exists():
+            if dry:
+                return f"would create {memory_file} with the rule"
+            memory_file.parent.mkdir(parents=True, exist_ok=True)
+            memory_file.write_text(entry, encoding="utf-8")
+            return f"wired (created {memory_file})"
+    except OSError as exc:
+        return f"NOT WIRED — {type(exc).__name__}: {exc} (paste manually)"
+    if dry:
+        return f"no agent memory store found at {memory_file} (nothing to write)"
+    return (
+        f"NOT WIRED — no agent memory store at {memory_file}; paste the "
+        "entry manually (examples/memory-entry.example.md)"
+    )
 
 
 def default_home() -> Path:
@@ -181,6 +262,11 @@ def run_suites(dest_dir: Path) -> int:
     sc = dest_dir / "session_coord.py"
     guard = dest_dir / "coord_guard.sh"
     env = dict(os.environ, SC=str(sc), GUARD=str(guard), COORD_SC=str(sc))
+    # A caller's exported HERMES_COORD_ID would make every suite register and
+    # claim under that same session (v2.3.2 honors it as the default --id),
+    # turning the verify run into a self-collision on the live board. The
+    # suites manage their own ids and scratch DBs — scrub it.
+    env.pop("HERMES_COORD_ID", None)
     failed = []
     for suite in SUITES:
         path = dest_dir / suite
@@ -220,6 +306,14 @@ def main() -> int:
                     help="also seed an example cron_resources.json if none exists")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip running the selftest suites after install")
+    ap.add_argument("--no-wire-memory", action="store_true",
+                    help="skip writing the standing memory rule "
+                         "(scripts + board only; see "
+                         "examples/memory-entry.example.md)")
+    ap.add_argument("--memory-file", type=Path, default=None,
+                    help="agent memory store to wire the rule into "
+                         "(default: <HERMES_HOME|~/.hermes>/memories/"
+                         "MEMORY.md)")
     ap.add_argument("--check", action="store_true",
                     help="dry run: report what WOULD change, touch nothing")
     args = ap.parse_args()
@@ -277,13 +371,30 @@ def main() -> int:
                       "SOME SUITES FAILED — see above. The install copied files but "
                       "could not prove itself on this machine."))
 
+    # 5. wire the agent in (standing memory rule)
+    memory_file = (args.memory_file if args.memory_file is not None
+                   else home / "memories" / "MEMORY.md")
+    sc = dest / "session_coord.py"
     if rc == 0 and not dry:
-        sc = dest / "session_coord.py"
+        print("\nAgent wiring (standing memory rule):")
+        if args.no_wire_memory:
+            print("  skipped (--no-wire-memory). Give your agent this entry:")
+            print(f"  {WIRE_ENTRY.format(sc=sc)}")
+            print("  (canonical copy: examples/memory-entry.example.md)")
+        else:
+            status = wire_memory(memory_file, sc, dry=False)
+            print(f"  {status}")
+            if status.startswith("NOT WIRED"):
+                print(f"  {WIRE_ENTRY.format(sc=sc)}")
+
         print("\nQuick start:")
         print(f"  ID=$(python3 {sc} register --task 'my task' --surface cli)")
         print(f"  python3 {sc} claim --id \"$ID\" --res file:/some/path")
         print(f"  python3 {sc} done  --id \"$ID\"")
         print(f"  python3 {sc} switch          # master on/off state")
+    elif dry:
+        print("\nAgent wiring (dry run):")
+        print(f"  {wire_memory(memory_file, sc, dry=True)}")
     return rc
 
 

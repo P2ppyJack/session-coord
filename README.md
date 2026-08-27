@@ -423,6 +423,7 @@ currently deciding, and warns if an env override is masking your sentinel.
 | Failure mode (without coordination) | Protection (section) |
 |---|---|
 | Two sessions edit the same file/skill; last writer wins | Claims + check-before-touch protocol (3.1) |
+| A session never checks the board, so the advisory protocol has no sting | Standing memory entry wired at install time — injected into every session, every turn (8.1) |
 | Token-burning retry loops while waiting | Single-call `--wait` polling + release notifications (3.2) |
 | Crashed session holds resources forever | TTL reaping, stale-session cleanup (3.3) |
 | Agents self-declare importance | User-only ranks; unranked preempt refused (3.4) |
@@ -527,11 +528,52 @@ python3 install.py                 # install or upgrade into ~/.hermes
 python3 install.py --check         # dry run: show what WOULD change, touch nothing
 python3 install.py --dest /opt/coord/bin --state-dir /var/lib/coord   # custom paths
 python3 install.py --seed-manifest # also drop an example cron manifest if none exists
+python3 install.py --no-wire-memory          # scripts only — skip the memory entry
+python3 install.py --memory-file ~/.hermes/memories/MEMORY.md   # explicit store target
 ```
 
 Re-running is safe: an existing install is upgraded in place (unchanged files
 are reported `unchanged`; a changed file is backed up to `<name>.bak-<ts>`
 first). The installer never flips the master switch and never deletes anything.
+
+### 8.1 Wire it into the agent — the step that makes it a protocol
+
+The board is *advisory* (Rule 1): it never wraps syscalls, so **a session
+that never checks it gets no protection at all**. Installing the scripts
+does not enroll sessions — an agent checks the board only when its standing
+instructions tell it to. That carrier is the **memory entry**: agent memory
+is injected into every session, every turn, so a rule living there fires on
+*every* task instead of only when a skill happens to load.
+
+`install.py` writes that entry automatically: it appends the canonical rule
+to the agent memory store (`~/.hermes/memories/MEMORY.md` — append-only,
+backed up first, and idempotent: a `session-coord (wire v1)` marker makes
+re-runs no-ops, and the store's own `§` delimiter keeps it a genuine
+standalone entry). Fail-open: if there is no memory store (not a Hermes
+machine), it prints the entry and installs everything else anyway. To see
+the entry before it lands, `--check` previews the wiring step.
+
+**If you installed manually, or want to wire a different agent, add this
+verbatim** (one line) to your agent's memory — ask your agent to "add this
+to your memory", or append it to `~/.hermes/memories/MEMORY.md`:
+
+```
+STANDING RULE — session-coord (wire v1): ALWAYS deconflict via the coordination board before touching shared resources (files, skills, memory, cron store, remote boxes, desktop UI) — any concurrent session/bot/cron may be mid-task. First: `python3 ~/.hermes/scripts/session_coord.py status`. Then register once (`ID=$(python3 ~/.hermes/scripts/session_coord.py register --task '...')`); claim before writes (`python3 ~/.hermes/scripts/session_coord.py claim --id $ID --res <keys> --wait`); `python3 ~/.hermes/scripts/session_coord.py done --id $ID` at task end. Full protocol: skill multi-session-coordination. Off-switch: `python3 ~/.hermes/scripts/session_coord.py disable`.
+```
+
+Note: the `hermes memory` CLI configures the external memory *provider* — it
+does **not** add entries. The supported paths are asking the agent (it has a
+memory tool), editing the file, or letting `install.py` do it. Every active
+agent profile on the machine needs a copy (for bots, the persona blurb in
+`bot-soul-coordination.example.md` is profile-scoped enrollment instead).
+
+**If you are an agent performing this install:** run `install.py`, then add
+the entry above to your own memory store verbatim (adjusting the script path
+if `--dest` was used) — or verify it is already there if the installer
+reported `wired`. Then run `python3 ~/.hermes/scripts/session_coord.py
+status` once to create the board and prove the CLI works. From then on:
+check the board before touching shared resources, register once per task,
+claim before writing, `done` at the end.
 
 **Manual install** (if you prefer to place files yourself):
 
@@ -568,8 +610,10 @@ HERMES_COORD_DISABLED=1 ./one-shot-wrapper.sh   # off for just this run
 
 **Enrollment for bots and subagents.** Concurrent named agents and fan-out
 children inherit no environment, so they learn the protocol from their prompt.
-Ready-to-paste texts ship in `examples/bot-soul-coordination.example.md` and
-`examples/subagent-prompt.example.md`.
+Ready-to-paste texts ship in `examples/bot-soul-coordination.example.md`
+(bot persona blurb) and `examples/subagent-prompt.example.md` (fan-out child
+prompt); the main-session enrollment — the standing memory entry of §8.1 —
+ships in `examples/memory-entry.example.md`.
 
 ## 9. Command tour
 
