@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
-# 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: payload/examples moved under skills/multi-session-coordination/ (the Hermes skill layout — hub/tap/direct-URL installs copy only that subtree). New step 6: copies the skill bundle (SKILL.md + references/ + templates/ + examples/, NOT scripts/ — those already land in the scripts dir) to <home>/skills/multi-session-coordination by default (--skill-dest override, --no-skill opt-out), idempotent with backup-on-change like the payload. Docstring updated; everything else unchanged.
+# 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: payload/examples moved under skills/multi-session-coordination/ (the Hermes skill layout — hub/tap/direct-URL installs copy only that subtree). New step 6: copies the skill bundle (SKILL.md + references/ + templates/ + examples/, NOT scripts/ — those already land in the scripts dir) to <home>/skills/multi-session-coordination by default (--skill-dest override, --no-skill opt-out), idempotent with backup-on-change like the payload. Docstring updated; everything else unchanged.  # noqa: E501
 # 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN STEP: default ON appends the canonical standing memory entry ("session-coord (wire v1)" marker) to the agent memory store (default <HERMES_HOME|~/.hermes>/memories/MEMORY.md; --memory-file override; --no-wire-memory opt-out). Idempotent marker check, .bak-<ts> backup before append, store created only when the memories/ parent already exists, fail-open (absent/unwritable store prints the entry for manual placement, never fails the install); entry text format()s the real --dest script path. run_suites scrubs HERMES_COORD_ID from the verify env (v2.3.2 register/claim honor it as default --id — a caller's exported id made every suite self-collide on the live board). CI smoke test extended: re-run + exactly-one-marker assertion.  # noqa: E501
 """install.py — set up (or upgrade) session-coord on this machine.
 
@@ -222,7 +222,8 @@ def copy_tree(src: Path, dst: Path, *, dry: bool) -> list:
             out.append(f"  {rel:<28} unchanged")
             continue
         bak = target.with_name(f"{target.name}.bak-{stamp()}")
-        action = "UPGRADED (prev -> %s)" % bak.name if target.exists() else "installed"
+        action = (f"UPGRADED (prev -> {bak.name})" if target.exists()
+                  else "installed")
         if not dry:
             dst.mkdir(parents=True, exist_ok=True)
             if target.exists():

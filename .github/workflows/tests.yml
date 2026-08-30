@@ -42,8 +42,9 @@ jobs:
           keys = dict(re.findall(r"^([a-z_]+):\s*(.*)$", fm, re.M))
           for field in ("name", "description", "version", "author", "license", "platforms"):
               assert keys.get(field), "frontmatter missing " + field
-          assert len(keys["description"]) <= 60, "description > 60 chars (house hardline)"
-          assert keys["description"].rstrip().endswith("."), "description must end with a period"
+          desc = keys["description"].strip().strip('"').strip()
+          assert len(desc) <= 60, "description > 60 chars (house hardline)"
+          assert desc.rstrip().endswith("."), "description must end with a period"
           assert keys["name"] == "multi-session-coordination", "name mismatch"
           for ref in re.findall(r"`(references|templates|scripts|examples)/[^`]+`", content):
               assert (root / ref).exists(), "SKILL.md references missing file: " + ref
