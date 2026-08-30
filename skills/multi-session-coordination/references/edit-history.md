@@ -1,0 +1,23 @@
+# Edit History — multi-session-coordination (rollover archive, newest first)
+
+2026-08-30 | deepseek-v4-flash | custom | desktop session | 2.3.3 OFFICIAL-SKILL PACKAGING (detail in CHANGELOG): repo restructured to the Hermes skill layout skills/multi-session-coordination/ (SKILL.md + references/ + templates/ + scripts/ + examples/) so hub/tap/direct-URL `hermes skills install` works; canonical SKILL.md with house-standard frontmatter (author human-first, platforms [linux, macos], ≤60-char description, standard section order, Hermes-tool framing); install.py step 6 installs the skill bundle (--skill-dest/--no-skill); CI gains a skill-contract gate + bundle-idempotency check; README official-install section; template genericized (no machine-specific hosts)
+
+2026-08-26 | claude-fable-5 | anthropic | desktop session | v2.3.1 --id resolution: done/release/pause/resume/preempt/inbox now resolve --id by full id OR unique prefix (board shows 8 chars, stores 12) and EXIT NONZERO on no-match/ambiguous — was a silent no-op (release printed success while the claim survived). register/claim/check/wait exempt. Reuses resolve_session(); _ID_RESOLVING_VERBS gate in main(). selftest.sh 19->23 (122 total). Ported to repo + CHANGELOG 2.3.1
+
+2026-08-26 | claude-opus-4-8 | anthropic | desktop session | v2.3 MASTER SWITCH: whole layer toggles off without uninstall — enable/disable/switch[toggle] verbs, fail-open no-op preserving every verb's stdout contract (register still yields id, cron-guard stdout empty). Two-layer precedence env HERMES_COORD_DISABLED > sentinel ~/.hermes/state/coordination_disabled > default ON; coord_guard.sh honors it WITHOUT spawning python. selftest_toggle.sh +28. Ported to P2ppyJack/session-coord with new install.py (never-clobbers DB/manifest, self-verifying, idempotent) + scrubbed bot-soul/subagent enrollment examples + CHANGELOG 2.3.0 + CI (toggle suite, installer smoke, ruff/bandit/shellcheck on new files — shellcheck exit-0 verified via fetched binary, SC1010/2319/2030 fixed)
+Older entries from the SKILL.md edit-history block land here when the block exceeds ~5 lines.
+
+2026-08-21 | claude-fable-5 | anthropic | desktop session | Fixture pitfall: bot-profile routine script paths resolve vs profiles/<bot>/scripts/ not ~/.hermes/scripts/ — probe copied into the bot profile, live tick verified ok
+
+2026-08-18 | claude-fable-5 | anthropic | desktop session | v2.2 published to P2ppyJack/session-coord (PR #1, branch feat/bot-mode-interbot-deconfliction): comment pass on bot-leg code (fail-inert rationale, collision-order, tag-hygiene comments; glob to top-level import), delta PORTED into CI-adapted repo copies (portable box:gpu1 names, $SC module load, TMPDIR mktemp), repo suite 90/90 + ruff@latest strict clean, CHANGELOG 2.2.0, README §3.16 + threat rows, CI counts 38->45
+
+2026-08-18 | claude-fable-5 | anthropic | desktop session | Scope + @botname doctrine: documented one-board/cross-everything scope (no per-bot silos; blurb = enrollment), @mention escalation ladder (board=enforcement, @botname=negotiation/batching/preempt-to-bot, Toby=arbiter, chat is never a lock); rule added to SOUL.md template + live test bot
+
+2026-08-18 | claude-fable-5 | anthropic | desktop session | v2.2 Bot Mode leg: cron radar/advisories/guard now read EVERY profile store (~/.hermes/profiles/*/cron/jobs.json) — Bot Mode bots are profiles, their Routines live there; "[bot:<name>]" attribution through all outputs; --surface bot:<name> convention; SOUL.md coordination blurb (templates/bot-soul-coordination.md); selftest_cron +7 bot checks (90 total)
+
+2026-08-16 | claude-fable-5 | anthropic | desktop session | v2.1: crons become first-class participants — manifest (~/.hermes/state/cron_resources.json), coord_guard.sh step-0 in nightly wrappers (wait/skip policies, fail-open), session-side CRON ADVISORY on claim/check, status cron radar w/ conflict flags, critical-cron decision protocol (wait/pause/early — ask user), wait-for-cron verb, cron-note pause ledger + done-time unresolved-pause warning; bugfixes: rank fencing preserved across release (persistent waiter queue w/ last_poll liveness), prioritize now notifies re-ranked children; 83 checks green (19 v1 + 26 v2 + 38 cron)
+
+2026-08-16 | claude-fable-5 | anthropic | desktop session | v2: user priority ranks + reorder, preempt->pause->resume protocol, queue fencing (rank then FIFO), subagent lineage ranks (1a/1b), urgent-alert on board touch; tested via subagent (19 v1 regression + priority suite)
+
+2026-08-16 | claude-fable-5 | anthropic | desktop session | Initial: SQLite coordination board (session_coord.py), co-worker protocol, resource conventions, 19-test selftest
+

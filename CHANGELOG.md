@@ -5,6 +5,46 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-08-30
+
+### Added — official Hermes skill packaging
+
+The repo now follows the standard Hermes skill layout, so the project is
+installable as an **official skill** through the Skills Hub:
+
+- **New layout**: everything the skill needs moved under
+  `skills/multi-session-coordination/` — `SKILL.md` (canonical, house-standard
+  frontmatter: author human-first `Tobias Musser (P2ppyJack)`, `platforms:
+  [linux, macos]` audited against the POSIX selftests, ≤60-char description)
+  plus `references/` (edit-history archive, publishing & CI notes),
+  `templates/` (bot SOUL.md blurb, machine-generic), `scripts/` (the engine:
+  CLI + guard + 4 selftest suites), and `examples/` (enrollment texts, cron
+  manifest, wrapper).
+- **Install paths** (README §8): `hermes skills install
+  P2ppyJack/session-coord/skills/multi-session-coordination`, tap install, or
+  direct-URL install of the raw SKILL.md. A hub install copies SKILL.md +
+  referenced support files into `~/.hermes/skills/` (the CLI then lives in the
+  skill's `scripts/`); `install.py` remains the full-wiring path.
+- **`install.py` step 6**: installs the skill bundle itself (SKILL.md +
+  references/ + templates/ + examples/ → `~/.hermes/skills/multi-session-coordination`,
+  `--skill-dest` / `--no-skill`) with the same idempotent
+  backup-on-change policy as the payload — one command now delivers scripts +
+  skill + standing memory rule.
+- **CI**: new "skill bundle layout + frontmatter" gate (checks the official
+  skill contract: file placement, required frontmatter fields, ≤60-char
+  description, referenced files exist in-bundle, no machine-local paths) plus
+  an installer idempotency check that the skill bundle lands and a re-run
+  creates no backups. All paths moved to the new layout.
+
+### Compatibility
+
+- No engine changes: `session_coord.py`, `coord_guard.sh`, the rc 0/75
+  contract, and all 127 selftest checks are unchanged (suites re-run green
+  from the new paths). The repo previously had no SKILL.md at all; the skill
+  text that lived only in `~/.hermes/skills/` is now canonical in-repo.
+
+## [2.3.2] — 2026-08-26
+
 ### Added — automatic agent wiring at install time
 
 The board is advisory, so installing the scripts alone protected nobody:

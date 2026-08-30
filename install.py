@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
+# 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: payload/examples moved under skills/multi-session-coordination/ (the Hermes skill layout — hub/tap/direct-URL installs copy only that subtree). New step 6: copies the skill bundle (SKILL.md + references/ + templates/ + examples/, NOT scripts/ — those already land in the scripts dir) to <home>/skills/multi-session-coordination by default (--skill-dest override, --no-skill opt-out), idempotent with backup-on-change like the payload. Docstring updated; everything else unchanged.
 # 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN STEP: default ON appends the canonical standing memory entry ("session-coord (wire v1)" marker) to the agent memory store (default <HERMES_HOME|~/.hermes>/memories/MEMORY.md; --memory-file override; --no-wire-memory opt-out). Idempotent marker check, .bak-<ts> backup before append, store created only when the memories/ parent already exists, fail-open (absent/unwritable store prints the entry for manual placement, never fails the install); entry text format()s the real --dest script path. run_suites scrubs HERMES_COORD_ID from the verify env (v2.3.2 register/claim honor it as default --id — a caller's exported id made every suite self-collide on the live board). CI smoke test extended: re-run + exactly-one-marker assertion.  # noqa: E501
 """install.py — set up (or upgrade) session-coord on this machine.
 
@@ -29,6 +30,14 @@ What it does
    backed up (.bak-<ts>) before any append, and fail-open: an absent or
    unwritable store prints the entry for manual placement and never fails
    the install.
+6. Installs the skill bundle: copies SKILL.md + references/ + templates/ +
+   examples/ from skills/multi-session-coordination/ into
+   <HERMES_HOME|~/.hermes>/skills/multi-session-coordination (--skill-dest
+   overrides; --no-skill skips), so the skill is loadable by the agent
+   exactly like a `hermes skills install` copy — idempotent, backs up a
+   locally-modified file before replacing it, and never deletes anything.
+   (scripts/ are NOT duplicated into the skill dir — they already land in
+   the scripts directory by step 1.)
 
 Nothing runs in the background; there is no daemon and no uninstall step beyond
 deleting the copied files (your data dir is yours).
@@ -46,8 +55,20 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SRC = HERE / "scripts"
-EXAMPLES = HERE / "examples"
+SKILL_DIR = HERE / "skills" / "multi-session-coordination"
+SRC = SKILL_DIR / "scripts"
+EXAMPLES = SKILL_DIR / "examples"
+
+# Skill-bundle files (everything the agent needs to load the skill, mirroring
+# what `hermes skills install` copies). scripts/ is deliberately excluded: the
+# payload above already installs those into the scripts dir, and the skill
+# documents the scripts dir as the tool's canonical location.
+SKILL_BUNDLE = (
+    ("SKILL.md", False),
+    ("references", False),
+    ("templates", False),
+    ("examples", False),
+)
 
 # name -> executable?  (files copied into the scripts dir)
 PAYLOAD = {
@@ -179,6 +200,70 @@ def copy_one(name: str, dest_dir: Path, *, executable: bool, dry: bool) -> str:
         if executable:
             make_executable(dst)
     return "installed"
+
+
+def copy_tree(src: Path, dst: Path, *, dry: bool) -> list:
+    """Recursively copy one directory's contents into another, idempotently.
+
+    Mirrors copy_one's never-clobber policy: a differing destination file is
+    backed up to <name>.bak-<timestamp> before replacement. Returns per-file
+    status lines for the install summary.
+    """
+    out = []
+    if not src.is_dir():
+        return [f"MISSING-SRC ({src})"]
+    for item in sorted(src.iterdir()):
+        if item.is_dir():
+            out.extend(copy_tree(item, dst / item.name, dry=dry))
+            continue
+        rel = item.name
+        target = dst / rel
+        if target.exists() and filecmp.cmp(item, target, shallow=False):
+            out.append(f"  {rel:<28} unchanged")
+            continue
+        bak = target.with_name(f"{target.name}.bak-{stamp()}")
+        action = "UPGRADED (prev -> %s)" % bak.name if target.exists() else "installed"
+        if not dry:
+            dst.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                shutil.copy2(target, bak)
+            shutil.copy2(item, target)
+        out.append(f"  {rel:<28} {action}")
+    return out
+
+
+def copy_one_file(src: Path, dst: Path, *, dry: bool) -> str:
+    """Idempotent single-file copy with backup-on-change (mirrors copy_one)."""
+    if not src.exists():
+        return f"MISSING-SRC ({src})"
+    if dst.exists() and filecmp.cmp(src, dst, shallow=False):
+        return "unchanged"
+    bak = dst.with_name(f"{dst.name}.bak-{stamp()}")
+    action = f"UPGRADED (prev -> {bak.name})" if dst.exists() else "installed"
+    if not dry:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            shutil.copy2(dst, bak)
+        shutil.copy2(src, dst)
+    return action
+
+
+def install_skill_bundle(skill_dest: Path, *, dry: bool) -> list:
+    """Copy the skill bundle (SKILL.md + references/ + templates/ + examples/)
+    into the agent's skills tree, mirroring a `hermes skills install` copy.
+    Returns status lines; never raises on missing sources (fail-open)."""
+    out = []
+    for name, _ in SKILL_BUNDLE:
+        src = SKILL_DIR / name
+        if not src.exists():
+            out.append(f"  {name:<28} MISSING-SRC ({src})")
+            continue
+        if src.is_dir():
+            out.extend(copy_tree(src, skill_dest / name, dry=dry))
+        else:
+            out.append(f"  {name:<28} "
+                       f"{copy_one_file(src, skill_dest / name, dry=dry)}")
+    return out
 
 
 def seed_manifest(state_dir: Path, *, do_seed: bool, dry: bool) -> str:
@@ -314,6 +399,13 @@ def main() -> int:
                     help="agent memory store to wire the rule into "
                          "(default: <HERMES_HOME|~/.hermes>/memories/"
                          "MEMORY.md)")
+    ap.add_argument("--skill-dest", type=Path, default=None,
+                    help="skills directory to install the skill bundle into "
+                         "(default: <HERMES_HOME|~/.hermes>/skills/"
+                         "multi-session-coordination)")
+    ap.add_argument("--no-skill", action="store_true",
+                    help="skip installing the skill bundle (SKILL.md + "
+                         "references/ + templates/ + examples/)")
     ap.add_argument("--check", action="store_true",
                     help="dry run: report what WOULD change, touch nothing")
     args = ap.parse_args()
@@ -347,7 +439,16 @@ def main() -> int:
     manifest_state = seed_manifest(state, do_seed=args.seed_manifest, dry=dry)
     print(f"  {'cron_resources.json':<26} {manifest_state}")
 
-    # 3. master switch state (never changed by install)
+    # 3. skill bundle (SKILL.md + references/ + templates/ + examples/)
+    skill_dest = (args.skill_dest if args.skill_dest is not None
+                  else home / "skills" / "multi-session-coordination")
+    print(f"\nSkill bundle -> {skill_dest}"
+          + ("   (skipped: --no-skill)" if args.no_skill else ""))
+    if not args.no_skill:
+        for line in install_skill_bundle(skill_dest.resolve(), dry=dry):
+            print(line)
+
+    # 4. master switch state (never changed by install)
     sentinel_env = os.environ.get("HERMES_COORD_DISABLED_FILE")
     sentinel = Path(sentinel_env) if sentinel_env else state / "coordination_disabled"
     switch = "DISABLED (sentinel present)" if sentinel.exists() else "ENABLED (default)"
@@ -355,7 +456,7 @@ def main() -> int:
     if sentinel.exists():
         print(f"  re-enable with:  python3 {dest / 'session_coord.py'} enable")
 
-    # 4. verify
+    # 5. verify
     rc = 0
     if dry:
         print("\n(dry run complete — re-run without --check to apply)")
@@ -371,7 +472,7 @@ def main() -> int:
                       "SOME SUITES FAILED — see above. The install copied files but "
                       "could not prove itself on this machine."))
 
-    # 5. wire the agent in (standing memory rule)
+    # 6. wire the agent in (standing memory rule)
     memory_file = (args.memory_file if args.memory_file is not None
                    else home / "memories" / "MEMORY.md")
     sc = dest / "session_coord.py"

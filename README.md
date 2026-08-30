@@ -371,9 +371,9 @@ human session's. Three mechanisms make bots first-class:
   to interrupt a mid-turn bot. Ranks stay human-set; bots never self-prioritize.
 
 The exact enrollment texts ship in the repo so you don't have to reinvent them:
-[`examples/bot-soul-coordination.example.md`](examples/bot-soul-coordination.example.md)
+[`skills/multi-session-coordination/examples/bot-soul-coordination.example.md`](skills/multi-session-coordination/examples/bot-soul-coordination.example.md)
 (paste into a bot's persona) and
-[`examples/subagent-prompt.example.md`](examples/subagent-prompt.example.md)
+[`skills/multi-session-coordination/examples/subagent-prompt.example.md`](skills/multi-session-coordination/examples/subagent-prompt.example.md)
 (paste into a fan-out child's prompt).
 
 ### 3.17 The master switch: turn coordination off without uninstalling
@@ -462,7 +462,7 @@ actors. They compose: single-flight guards re-entrancy, the board guards intent.
 
 ## 6. Quality: testing and scans
 
-Everything below ships in the repo (`scripts/selftest*.sh`) and is re-runnable in one
+Everything below ships in the repo (`skills/multi-session-coordination/scripts/selftest*.sh`) and is re-runnable in one
 command each; nothing is claimed that a clone cannot re-verify.
 
 **Regression / compatibility / feature suites — 127 checks, all green:**
@@ -517,8 +517,31 @@ dated, attributed), plus the repository `CHANGELOG.md`.
 
 ## 8. Install and quick start
 
-**One-command install (recommended).** Cross-platform, pure standard library,
-no network. It copies the CLI + guard + selftests into place, creates the state
+**Install as an official Hermes skill** (the repo follows the standard Hermes
+skill layout — `skills/multi-session-coordination/` with SKILL.md +
+`references/` + `templates/` + `scripts/` + `examples/`), any of:
+
+```bash
+# direct GitHub install (no tap needed)
+hermes skills install P2ppyJack/session-coord/skills/multi-session-coordination
+
+# ...or add the repo as a tap and install from it
+hermes skills tap add P2ppyJack/session-coord
+hermes skills install P2ppyJack/session-coord/multi-session-coordination
+
+# ...or straight from the raw SKILL.md URL
+hermes skills install https://raw.githubusercontent.com/P2ppyJack/session-coord/main/skills/multi-session-coordination/SKILL.md
+```
+
+A hub install copies SKILL.md plus the referenced support files into
+`~/.hermes/skills/multi-session-coordination/` (the CLI then lives in that
+skill's `scripts/`). **It does not enroll your agent** — for full wiring
+(CLI in `~/.hermes/scripts/` + the standing memory rule), run `install.py`
+from a clone, or follow the manual path in §8.1.
+
+**One-command install (recommended for full wiring).** Cross-platform, pure standard library,
+no network. It copies the CLI + guard + selftests into place, installs the
+skill bundle, creates the state
 directory, **never touches an existing board DB or cron manifest**, backs up any
 locally-modified script before replacing it, and then proves itself by running
 the full selftest matrix:
@@ -579,7 +602,8 @@ claim before writing, `done` at the end.
 
 ```bash
 # 1. Drop the CLI + guard somewhere on PATH (stdlib only, Python ≥3.8)
-cp scripts/session_coord.py scripts/coord_guard.sh ~/.hermes/scripts/
+cp skills/multi-session-coordination/scripts/session_coord.py \
+   skills/multi-session-coordination/scripts/coord_guard.sh ~/.hermes/scripts/
 
 # 2. A session's lifecycle
 SID=$(python3 session_coord.py register --task "refactor helper lib" --surface desktop)
@@ -588,15 +612,16 @@ python3 session_coord.py claim  --id "$SID" --res file:~/project/lib --res skill
 #   ... work ...
 python3 session_coord.py done   --id "$SID"       # release everything, notify waiters
 
-# 3. Wire the cron guard into a wrapper (optional, fail-open) — see examples/wrapper.example.sh
+# 3. Wire the cron guard into a wrapper (optional, fail-open) — see skills/multi-session-coordination/examples/wrapper.example.sh
 source ~/.hermes/scripts/coord_guard.sh           # exits 75 if it should defer
 
 # 4. Tell the board what your crons touch (optional)
-cp examples/cron_resources.example.json ~/.hermes/state/cron_resources.json
+cp skills/multi-session-coordination/examples/cron_resources.example.json ~/.hermes/state/cron_resources.json
 
 # 5. Verify everything on your machine
-bash scripts/selftest.sh && bash scripts/selftest_priority.sh && \
-  bash scripts/selftest_cron.sh && bash scripts/selftest_toggle.sh
+cd skills/multi-session-coordination/scripts
+bash selftest.sh && bash selftest_priority.sh && \
+  bash selftest_cron.sh && bash selftest_toggle.sh
 ```
 
 **Turning it off.** Coordination is overhead when you run solo. Disable the
@@ -610,10 +635,10 @@ HERMES_COORD_DISABLED=1 ./one-shot-wrapper.sh   # off for just this run
 
 **Enrollment for bots and subagents.** Concurrent named agents and fan-out
 children inherit no environment, so they learn the protocol from their prompt.
-Ready-to-paste texts ship in `examples/bot-soul-coordination.example.md`
-(bot persona blurb) and `examples/subagent-prompt.example.md` (fan-out child
+Ready-to-paste texts ship in `skills/multi-session-coordination/examples/bot-soul-coordination.example.md`
+(bot persona blurb) and `skills/multi-session-coordination/examples/subagent-prompt.example.md` (fan-out child
 prompt); the main-session enrollment — the standing memory entry of §8.1 —
-ships in `examples/memory-entry.example.md`.
+ships in `skills/multi-session-coordination/examples/memory-entry.example.md`.
 
 ## 9. Command tour
 
