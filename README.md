@@ -6,7 +6,8 @@
 Named bots with their own sub-sessions and routines. All touching the same files,
 skills, GPU boxes, and state — at the same time.**
 
-`session-coord` is a small, dependency-free SQLite-backed coordination board plus a CLI
+`session-coord` is a small, dependency-free SQLite-backed **session-deconfliction**
+board plus a CLI
 (`session_coord.py`) and a zero-token cron guard (`coord_guard.sh`) that let all of those
 actors behave like **polite co-workers instead of competitors**: they announce what they
 are working on, wait for each other, hand resources over in priority order, and never
@@ -15,6 +16,44 @@ silently clobber each other's work.
 It was built for [Hermes Agent](https://github.com/NousResearch/hermes-agent) sessions,
 but the design is agent-framework-agnostic: anything that can run a CLI before touching a
 shared resource can participate.
+
+---
+
+## Quick start — install & deconflict
+
+**Install as an official Hermes skill** (the repo ships the standard
+`skills/multi-session-coordination/` layout — pick any one):
+
+```bash
+# direct GitHub install (no tap needed)
+hermes skills install P2ppyJack/session-coord/skills/multi-session-coordination
+
+# ...or subscribe as a tap, then install by slug
+hermes skills tap add P2ppyJack/session-coord
+hermes skills install P2ppyJack/session-coord/multi-session-coordination
+
+# ...or straight from the raw SKILL.md URL
+hermes skills install https://raw.githubusercontent.com/P2ppyJack/session-coord/main/skills/multi-session-coordination/SKILL.md
+```
+
+**Full wiring in one command** (CLI in `~/.hermes/scripts/` + the skill bundle +
+the standing memory rule that makes every agent actually check the board):
+
+```bash
+git clone git@github.com:P2ppyJack/session-coord.git && cd session-coord
+python3 install.py          # --check for a dry run
+```
+
+**Try it:**
+
+```bash
+python3 ~/.hermes/scripts/session_coord.py status
+ID=$(python3 ~/.hermes/scripts/session_coord.py register --task "my task" --surface cli)
+python3 ~/.hermes/scripts/session_coord.py claim --id "$ID" --res file:~/project --wait
+python3 ~/.hermes/scripts/session_coord.py done --id "$ID"
+```
+
+Details, policies, and rationale: §8 (install), §9 (command tour), §1–§3 (mechanisms).
 
 ---
 
