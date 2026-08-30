@@ -101,6 +101,11 @@ needed to PROVE them, so absence is a graceful skip, not a failure. Git Bash on
 
 Conventional Commits (`fix(scope): …`, `feat(scope): …`); scopes seen here:
 `install`. One logical change per commit. Bump `CHANGELOG.md` (Keep a Changelog)
-+ the version paragraph counts + `SKILL.md` verification counts together. Commit
-LOCALLY and **ask Toby before `git push`** (his standing comms rule covers repo
-writes too — though he pre-approved the push for this line of work).
++ the version paragraph counts + `SKILL.md` verification counts together.
+**Tag + release AT COMMIT TIME, never deferred**: every CHANGELOG version bump
+gets a matching `git tag vX.Y.Z` (SSH-signed) and a GitHub Release from the
+tag with notes from the CHANGELOG. 2.3.0–2.3.2 skipped this and had to be
+back-filled as one v2.3.3 release (2026-08-30); a deferred tag is a forgotten
+tag. Commit LOCALLY and **ask Toby before `git push`** (his standing comms
+rule covers repo writes too — though he pre-approved the push for this line
+of work).
