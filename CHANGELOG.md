@@ -7,6 +7,31 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [2.3.3] — 2026-08-30
 
+### Added — automatic agent wiring at install time (folded in from the previous
+commit's Unreleased notes — the wire-in step shipped with this release)
+
+The board is advisory, so installing the scripts alone protected nobody:
+sessions consult it only when their standing instructions say to. The
+installer now wires that enrollment itself.
+
+- `install.py` appends the canonical standing memory rule to the agent's
+  memory store by default (`~/.hermes/memories/MEMORY.md`, i.e.
+  `<HERMES_HOME>/memories/MEMORY.md`; `--memory-file` overrides,
+  `--no-wire-memory` opts out). The append is byte-faithful to the store's
+  own writer (entries joined by `\n§\n`) so the rule lands as a genuine
+  standalone entry, carries the stable marker `session-coord (wire v1)` for
+  idempotent re-runs, backs the previous file up to `<name>.bak-<ts>`, and
+  fails open — a machine with no Hermes memory store prints the entry for
+  manual placement and installs everything else anyway. `--check` previews
+  the wiring step.
+- `examples/memory-entry.example.md`: the canonical "always call it" entry
+  with the three delivery paths (ask the agent / edit the file / installer)
+  and an instruction block for an agent performing the install itself.
+- README §8.1 "Wire it into the agent" and a threat-model row for
+  non-participating sessions (the failure this closes).
+- CI: installer smoke test now re-runs the installer against a scratch
+  memory store and asserts exactly one wire marker survives.
+
 ### Added — official Hermes skill packaging
 
 The repo now follows the standard Hermes skill layout, so the project is
