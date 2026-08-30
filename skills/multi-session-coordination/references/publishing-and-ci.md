@@ -53,6 +53,21 @@ v2.3.0 and v2.3.1 were pushed after a full local green sweep and both went
 **red on GitHub** — the Windows leg failed. Never tell Toby "CI will pass";
 push, then VERIFY the run and only then report done.
 
+**2026-08-30 postmortem (2.3.3 packaging, run 33328867004):** the new
+skill-contract gate reddened ALL 9 matrix jobs AND the lint job. Two causes,
+both reproducible locally with the exact CI commands:
+
+1. The frontmatter regex captured the description **with its surrounding
+   double quotes** (`"Coordinate concurrent sessions: claim shared resources."`),
+   so `endswith(".")` failed on every OS. Fix: strip first —
+   `desc = keys["description"].strip().strip('"').strip()`.
+2. ruff flagged two things in `install.py`'s new code: a prepended EDIT
+   HISTORY line >100 chars needs `# noqa: E501` (the previous line carried it;
+   dropping it on prepend re-breaks the build), and printf-style
+   `"..." % x` trips UP031 (use f-strings).
+
+Re-pushed as 4e17dac; run 33329045589 green (9/9 + lint).
+
 Check the run without a token (anonymous REST):
 ```bash
 curl -fsSL "https://api.github.com/repos/P2ppyJack/session-coord/actions/runs?per_page=3" -o /tmp/ci.json
