@@ -55,7 +55,7 @@ jobs:
         run: bash skills/multi-session-coordination/scripts/selftest.sh
       - name: v2 priority/fencing/lineage suite (26 checks)
         run: bash skills/multi-session-coordination/scripts/selftest_priority.sh
-      - name: v2.1 cron-leg + v2.2 bot-leg suite (45 checks)
+      - name: v2.1 cron-leg + v2.2 bot-leg + v2.4 enrollment-audit suite (51 checks)
         run: bash skills/multi-session-coordination/scripts/selftest_cron.sh
       - name: v2.3 master-switch toggle suite (28 checks)
         run: bash skills/multi-session-coordination/scripts/selftest_toggle.sh
@@ -77,6 +77,22 @@ jobs:
           python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$MEM" --skill-dest "$RUNNER_TEMP/coord/skills/multi-session-coordination"
           python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$MEM" --skill-dest "$RUNNER_TEMP/coord/skills/multi-session-coordination"
           [ "$(grep -c 'session-coord (wire v1)' "$MEM")" -eq 1 ]
+      - name: installer bot wiring (SOUL.md blurb + idempotent + audit clears)
+        run: |
+          PROF="$RUNNER_TEMP/coord-profiles"
+          mkdir -p "$PROF/scout" "$PROF/no-persona" "$PROF/plain/memories"
+          printf '# Scout\nYou are the scout bot.\n' > "$PROF/scout/SOUL.md"
+          printf 'unrelated entry\n' > "$PROF/plain/memories/MEMORY.md"
+          python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$RUNNER_TEMP/coord-mem/MEMORY.md" --skill-dest "$RUNNER_TEMP/coord/skills/multi-session-coordination" --profiles-dir "$PROF"
+          python3 install.py --dest "$RUNNER_TEMP/coord/scripts" --state-dir "$RUNNER_TEMP/coord/state" --memory-file "$RUNNER_TEMP/coord-mem/MEMORY.md" --skill-dest "$RUNNER_TEMP/coord/skills/multi-session-coordination" --profiles-dir "$PROF"
+          [ "$(grep -c 'session-coord (bot-wire v1)' "$PROF/scout/SOUL.md")" -eq 1 ]
+          grep -q 'bot:scout' "$PROF/scout/SOUL.md"
+          [ ! -e "$PROF/no-persona/SOUL.md" ]
+          [ "$(grep -c 'session-coord (wire v1)' "$PROF/plain/memories/MEMORY.md")" -eq 1 ]
+          [ "$(grep -c 'session-coord (wire v1)' "$PROF/no-persona/memories/MEMORY.md")" -eq 1 ]
+          grep -q 'session-coord (wire v1)' "$PROF/scout/memories/MEMORY.md" && { echo "bot profile wrongly memory-wired"; exit 1; } || true
+          OUT=$(HERMES_COORD_DB="$RUNNER_TEMP/coord-audit.db" HERMES_COORD_PROFILES_DIR="$PROF" python3 "$RUNNER_TEMP/coord/scripts/session_coord.py" status)
+          echo "$OUT" | grep -qE 'UNENROLLED|UNWIRED' && { echo "wired profiles still flagged"; exit 1; } || true
 
   lint:
     runs-on: ubuntu-latest

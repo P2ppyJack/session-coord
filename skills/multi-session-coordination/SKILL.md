@@ -1,7 +1,7 @@
 ---
 name: multi-session-coordination
 description: "Coordinate concurrent sessions: claim shared resources."
-version: 2.3.3
+version: 2.4.0
 author: Tobias Musser (P2ppyJack), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -11,11 +11,11 @@ metadata:
     related_skills: [github-repo-management, github-issues, github-code-review, github-issue-to-pr]
 ---
 <!-- EDIT HISTORY (newest first; max ~5 entries, older -> references/edit-history.md)
+2026-08-31 | claude-fable-5 | anthropic | desktop session | v2.4.0 BOT ENROLLMENT hardening (Toby spotted the exemption-wording hazard): (1) blurb exemption tightened — "your OWN profile's memory" was blurrable into "things I made need no claim"; now names the EXACT profile-internal list, states self-created files in shared space still need claims, and disambiguates profile memory vs the machine's main memory store (template + example). (2) install.py step 7 wire_bots(): appends the blurb (marker "session-coord (bot-wire v1)") to every existing profiles/*/SOUL.md — default ON, --no-wire-bots/--profiles-dir; closes the each-new-bot-needs-a-manual-paste gap for existing bots. (3) status audits enrollment: persona-bearing profiles missing the marker -> UNENROLLED warning (+ unenrolled_bot_profiles in --json). (4) NON-BOT profiles (Toby spotted this gap too): a profile is a full agent instance whose own memory store the main rule never reaches — install.py step 8 wires the standing rule into each SOUL-less profile's memories/MEMORY.md (--no-wire-profiles), and status flags unwired ones (existing store without the rule; store-less = no evidence, never flagged). selftest_cron.sh 45->51 (133 total); CI wiring smoke step covers both legs.
 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: repo restructured to the Hermes skill layout (skills/multi-session-coordination/ with SKILL.md + references/ + templates/ + scripts/ + examples/) so `hermes skills install` / tap / direct-URL installs work; frontmatter brought to house standards (author human-first, platforms audited to [linux, macos], description <= 60 chars); body re-ordered to When to Use / Prerequisites / How to Run / Quick Reference / Procedure / Pitfalls / Verification with Hermes-tool framing; install.py gains a skill-bundle install step (--skill-dest / --no-skill); tool location made path-robust (install.py vs skill-bundle installs).
 2026-08-30 | claude-opus-4-8 | anthropic | defaults | Procedural quality-review pass (all custom skills): verified against live vendor docs/GitHub via browse-as-me + web, checked for supersession by official bundled skills, spot-checked cited paths/crons/config on-disk. Verdict: current.
 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN DOCS: new "Wiring it in" section — the standing memory rule is the missing always-call carrier (install.py now writes it by default, marker 'session-coord (wire v1)', --no-wire-memory/--memory-file; canonical entry + delivery paths in repo examples/memory-entry.example.md). Laura-install gap: scripts+skill install ≠ enrollment. Toby's own memory now carries the rule (verified §-delimited, marker=1).
 2026-08-26 | deepseek-v4-flash | custom | cli session | GitHub participation: related_skills frontmatter + repo-owner pointer block (bundled github-repo-management/github-issues/github-code-review/github-issue-to-pr) — session-coord is Toby's public repo, not just a port target
-2026-08-26 | claude-fable-5 | anthropic | desktop session | v2.3.2 explicit ids: register --id <memorable> (env HERMES_COORD_ID default) registers under the CALLER's id — was rejected pre-v2.3.2 while claim accepted it, orphaning claims (release: "no session matches", held to TTL; bit twice this day). Idempotent re-register; ids validated 4-64 alnum._-; claim under unknown id auto-creates the session row (any claimable id is releasable); disabled-mode register echoes explicit id. selftest.sh 23->28 (127 total). Ported to repo, CHANGELOG 2.3.2, CI green (a8023d2)
 -->
 
 # Multi-Session Coordination Skill
@@ -201,11 +201,22 @@ first; pre-claim family-wide resources at the parent level.
 
 A bot IS a Hermes profile running concurrently. One shared board — no per-bot scopes:
 every actor sees every other actor's claims identically. Enrollment via SOUL.md blurb
-(`templates/bot-soul-coordination.md`); bots register `--surface "bot:<name>"`. Bot
-routines (profile cron stores) auto-surface in the radar as `[bot:<name>]`, but a
-routine touching shared resources still needs a **manifest entry** to get
-advisories/guarding — the merge makes it resolvable, the manifest makes it declared.
-Ranks stay user-set; bot-to-bot chat is negotiation, never a lock.
+(`templates/bot-soul-coordination.md`) — `install.py` appends it to every EXISTING
+profile's SOUL.md automatically (marker `session-coord (bot-wire v1)`;
+`--no-wire-bots` opts out), and `status` flags persona-bearing profiles missing the
+marker as UNENROLLED so a bot created after install can't stay invisible until a
+collision. NON-BOT profiles (no SOUL.md) are wired through their OWN memory store
+instead — install.py appends the standing rule to `<profiles>/<name>/memories/MEMORY.md`
+(`--no-wire-profiles` opts out), and `status` flags a SOUL-less profile whose existing
+store lacks it as UNWIRED (store-less fresh profiles are never flagged — no evidence).
+Bots register `--surface "bot:<name>"`. The blurb's claim-free exemption
+is EXACTLY the bot's profile-internal stores (its own memory/sessions/cron) — files a
+bot itself created in shared space still need claims, and profile memory is not the
+machine's main memory store. Bot routines (profile cron stores) auto-surface in the
+radar as `[bot:<name>]`, but a routine touching shared resources still needs a
+**manifest entry** to get advisories/guarding — the merge makes it resolvable, the
+manifest makes it declared. Ranks stay user-set; bot-to-bot chat is negotiation,
+never a lock.
 
 ### Cron jobs on the board
 
@@ -283,14 +294,14 @@ ON. The shell guard honors it without spawning Python.
 
 ## Verification
 
-Four live selftest suites (127 checks total), all against scratch DBs — safe to run
+Four live selftest suites (133 checks total), all against scratch DBs — safe to run
 anytime. From a full install the suites are at `~/.hermes/scripts/`; from a
 skill-bundle install, in this skill's `scripts/`:
 
 ```bash
 bash <scripts-dir>/selftest.sh          # 28: v1 core (race -> 1 winner, wait/notify, boundaries, TTL, steal) + id resolution + explicit-id/orphan-proofing
 bash <scripts-dir>/selftest_priority.sh # 26: v2 ranks/preempt/pause/lineage/fencing + v1-schema migration
-bash <scripts-dir>/selftest_cron.sh     # 45: cron leg + v2.2 bot leg (profile stores, [bot:] tagging, collision, broken-store inertness)
+bash <scripts-dir>/selftest_cron.sh     # 51: cron leg + v2.2 bot leg (profile stores, [bot:] tagging, collision, broken-store inertness) + v2.4 enrollment audits (bot blurb + profile memory)
 bash <scripts-dir>/selftest_toggle.sh   # 28: v2.3 master switch (OFF fail-open no-op, ON restores, env > sentinel, shell guard honors)
 ```
 

@@ -8,9 +8,17 @@ standing prompt / persona file (the same reason subagents get it in their
 prompt; see `subagent-prompt.example.md`).
 
 **The board only sees actors that participate.** A bot whose persona lacks this
-blurb is invisible to coordination — this text *is* the enrollment. Paste the
-block below into every concurrent bot's standing prompt and substitute
-`<botname>`. Adjust the resource-key examples to your machine.
+blurb is invisible to coordination — this text *is* the enrollment. Two ways to
+deliver it:
+
+1. **Automatic:** `python3 install.py` appends it (botname substituted) to
+   every existing `profiles/*/SOUL.md` — idempotent via the marker line at the
+   end; `--no-wire-bots` opts out; `--profiles-dir` overrides the location.
+   Bots created AFTER the install still need step 2, and `session_coord.py
+   status` flags any persona-bearing profile missing the marker as
+   `UNENROLLED` so they can't stay invisible for long.
+2. **Manual:** paste the block below into the bot's standing prompt and
+   substitute `<botname>`. Adjust the resource-key examples to your machine.
 
 ---
 
@@ -23,8 +31,15 @@ resources. You MUST consult it before mutating anything shared.
 **Shared resources include** (adapt to your setup): remote boxes
 (`box:gpu-box-1`), the desktop UI (`ui:desktop`), singleton apps that allow
 only one client at a time, shared project directories (`file:~/project`), a
-shared skills/scripts tree, and any shared memory store. Your OWN profile's
-memory, sessions, and cron store are yours alone — no claim needed.
+shared skills/scripts tree, and the machine's MAIN agent memory store.
+
+**The ONLY claim-free exemption** is your own profile's INTERNAL stores — the
+memory, sessions, and cron store under your profile directory — because no
+other actor writes those. The exemption is exactly that list. Anything else,
+INCLUDING files and directories you yourself created (output dirs, reports,
+scripts you maintain), lives in shared space: another actor can legitimately
+touch it, so register and claim it like everything else. Your profile memory
+is NOT the shared memory store above — don't let "mine" blur that line.
 
 **Protocol** (register once per task, claim before mutating, release at the end):
 
@@ -54,3 +69,6 @@ Rules:
   matter what was agreed in conversation (messages are neither atomic nor able
   to interrupt a mid-turn bot).
 - If the board itself errors, say so and do NOT mutate shared resources blind.
+
+Enrollment marker: session-coord (bot-wire v1) — installer idempotence + board
+audit; do not remove this line.

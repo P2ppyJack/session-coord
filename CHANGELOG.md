@@ -5,6 +5,66 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-08-31
+
+### Added — bot enrollment: automatic wiring + board audit
+
+Bots enroll via their persona file (SOUL.md), not memory — handoff runs
+inherit no environment. Until now that paste was entirely manual and entirely
+invisible when missed: a bot without the blurb never consults the board, and
+nothing anywhere said so. Both halves are now closed.
+
+- `install.py` step 7 (`wire_bots`): appends the coordination blurb from
+  `templates/bot-soul-coordination.md` (with `<botname>` substituted) to every
+  existing `<profiles>/<name>/SOUL.md`. Default ON; `--no-wire-bots` opts out;
+  `--profiles-dir` (or `$HERMES_COORD_PROFILES_DIR`) overrides the location.
+  Idempotent via the `session-coord (bot-wire v1)` marker (shipped inside the
+  blurb), previous SOUL.md backed up to `.bak-<ts>`, fail-open like the memory
+  wiring. Profiles with no SOUL.md are reported, never invented. `--check`
+  previews the step.
+- **Enrollment audit in `status`**: any profile that HAS a SOUL.md but lacks
+  the marker is listed under `— UNENROLLED bot profiles` (and as
+  `unenrolled_bot_profiles` in `--json`), with the fix named — so a bot
+  created after install surfaces on the board view everyone already runs,
+  instead of staying invisible until it stomps something. Read-only,
+  fail-open; profiles without a persona are never flagged (nothing proves
+  they are bots).
+- `install.py` step 8 (`wire_profile_memories`): **non-bot profiles** are full
+  agent instances with their OWN memory stores — the main store's standing
+  rule never reaches their sessions. The rule is now appended to each
+  SOUL-less profile's `<profiles>/<name>/memories/MEMORY.md` (created if
+  absent; `--no-wire-profiles` opts out). Bot profiles are skipped here: the
+  SOUL.md blurb is their carrier, and double-wiring would cost tokens every
+  turn.
+- **Profile audit in `status`**: a SOUL-less profile whose own memory store
+  exists WITHOUT the standing rule is listed under `— UNWIRED profiles`
+  (`unwired_profiles` in `--json`). Store-less fresh profiles are never
+  flagged — an existing store proves agent sessions run there; absence of
+  one is no evidence (escalate only on confirmation).
+
+### Changed — exemption wording in the bot blurb (template + example)
+
+The blurb's claim-free carve-out read "your OWN profile's memory, sessions,
+and cron store are yours alone." Correct, but blurrable by a weaker model into
+"things that are *mine* need no claim" — inviting exactly the unregistered
+mutation the board exists to prevent (a bot's self-created output dir in
+shared space, or "my memory" misread as the machine's main memory store). The
+wording now names the exemption as EXACTLY the profile-internal stores, states
+that self-created files/dirs in shared space still need claims, and
+disambiguates profile memory from the machine's main memory store. The marker
+line doubles as the enrollment-audit sentinel.
+
+### Tests / CI
+
+- `selftest_cron.sh` 45 → 51 (133 total): bot audit flags an unenrolled
+  persona-bearing profile, `--json` carries `unenrolled_bot_profiles`, the
+  marker clears the flag, SOUL-less profiles never flagged by the bot leg;
+  profile audit flags an unwired non-bot profile (and in `--json`), the
+  standing rule clears it, store-less profiles never flagged.
+- CI: new installer wiring smoke step (bot blurb + profile memory: wire +
+  idempotent re-run + marker counts + no-persona SOUL untouched + bot not
+  double-wired into memory + audits clean after wiring).
+
 ## [2.3.3] — 2026-08-30
 
 ### Added — automatic agent wiring at install time (folded in from the previous

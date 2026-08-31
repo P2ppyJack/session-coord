@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
+# 2026-08-31 | claude-fable-5 | anthropic | desktop session | BOT WIRING (v2.4.0): new step 7 appends the SOUL.md coordination blurb (marker "session-coord (bot-wire v1)", shipped inside templates/bot-soul-coordination.md) to every existing profiles/*/SOUL.md — default ON, --no-wire-bots opt-out, --profiles-dir/$HERMES_COORD_PROFILES_DIR override; idempotent marker check, .bak-<ts> backup, <botname> substituted, profiles without a SOUL.md reported-not-touched, fail-open like wire_memory. Step 8 wire_profile_memories(): SOUL-less (non-bot) profiles get the standing rule appended to their OWN memories/MEMORY.md (created if absent; --no-wire-profiles opt-out) — a profile is a full agent instance the main store's rule never reaches; bot profiles skipped (blurb is their carrier). Closes the enrollment gap: install used to wire the MAIN profile's memory only, so bots AND profiles missed the docs paragraph and stayed invisible to the board.  # noqa: E501
 # 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: payload/examples moved under skills/multi-session-coordination/ (the Hermes skill layout — hub/tap/direct-URL installs copy only that subtree). New step 6: copies the skill bundle (SKILL.md + references/ + templates/ + examples/, NOT scripts/ — those already land in the scripts dir) to <home>/skills/multi-session-coordination by default (--skill-dest override, --no-skill opt-out), idempotent with backup-on-change like the payload. Docstring updated; everything else unchanged.  # noqa: E501
 # 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN STEP: default ON appends the canonical standing memory entry ("session-coord (wire v1)" marker) to the agent memory store (default <HERMES_HOME|~/.hermes>/memories/MEMORY.md; --memory-file override; --no-wire-memory opt-out). Idempotent marker check, .bak-<ts> backup before append, store created only when the memories/ parent already exists, fail-open (absent/unwritable store prints the entry for manual placement, never fails the install); entry text format()s the real --dest script path. run_suites scrubs HERMES_COORD_ID from the verify env (v2.3.2 register/claim honor it as default --id — a caller's exported id made every suite self-collide on the live board). CI smoke test extended: re-run + exactly-one-marker assertion.  # noqa: E501
 """install.py — set up (or upgrade) session-coord on this machine.
@@ -38,6 +39,19 @@ What it does
    locally-modified file before replacing it, and never deletes anything.
    (scripts/ are NOT duplicated into the skill dir — they already land in
    the scripts directory by step 1.)
+7. Wires existing BOT profiles in: appends the SOUL.md coordination blurb
+   (templates/bot-soul-coordination.md, `<botname>` substituted, marker
+   `session-coord (bot-wire v1)`) to every <profiles>/<name>/SOUL.md
+   (--profiles-dir overrides; --no-wire-bots skips). Idempotent, backed up
+   (.bak-<ts>), fail-open; profiles with no SOUL.md are reported, never
+   invented (they are step 8's job instead).
+8. Wires NON-BOT profiles in: a profile is a full agent instance with its
+   OWN memory store the main store's rule never reaches, so the standing
+   rule is appended to each SOUL-less profile's
+   <profiles>/<name>/memories/MEMORY.md (created if absent;
+   --no-wire-profiles skips). Bot profiles are skipped here — the blurb is
+   their carrier. Profiles/bots created after this install need wiring too:
+   re-run the installer; `session_coord.py status` flags unenrolled ones.
 
 Nothing runs in the background; there is no daemon and no uninstall step beyond
 deleting the copied files (your data dir is yours).
@@ -88,6 +102,14 @@ PROTECTED = ("session_coordination.db", "cron_resources.json")
 # the entry itself; a re-run (or an upgrade, or a re-paste) that finds it in
 # the store skips instead of duplicating. Keep it byte-stable.
 WIRE_MARKER = "session-coord (wire v1)"
+
+# Idempotency + audit marker for the bot SOUL.md blurb (step 7). The marker
+# line ships inside the template itself; `session_coord.py status` uses the
+# same string to flag persona-bearing profiles that never enrolled. Keep it
+# byte-stable and in lock-step with templates/bot-soul-coordination.md and
+# BOT_WIRE_MARKER in session_coord.py.
+BOT_WIRE_MARKER = "session-coord (bot-wire v1)"
+BOT_BLURB_TEMPLATE = SKILL_DIR / "templates" / "bot-soul-coordination.md"
 
 # The canonical standing memory rule. Kept as a single line — memory stores
 # separate entries by blank/§ delimiters, and one line is what a wrapping
@@ -154,6 +176,100 @@ def wire_memory(memory_file: Path, sc: Path, *, dry: bool) -> str:
         f"NOT WIRED — no agent memory store at {memory_file}; paste the "
         "entry manually (examples/memory-entry.example.md)"
     )
+
+
+def _bot_blurb(botname: str) -> str:
+    """The SOUL.md enrollment block: everything in the template from the
+    '## Shared-resource coordination' heading down (the prose above it is
+    for humans reading the template, not for the bot's persona), with
+    <botname> substituted. Raises OSError if the template is unreadable —
+    callers treat that as fail-open."""
+    text = BOT_BLURB_TEMPLATE.read_text(encoding="utf-8")
+    idx = text.find("## Shared-resource coordination")
+    block = text[idx:] if idx >= 0 else text
+    return block.replace("<botname>", botname).rstrip("\n") + "\n"
+
+
+def wire_bots(profiles_dir: Path, *, dry: bool) -> list:
+    """Append the coordination blurb to every existing bot profile's SOUL.md.
+
+    A bot profile = <profiles_dir>/<name>/ containing a SOUL.md (the persona
+    file every fresh `-p <name>` invocation loads — the only carrier that
+    reaches handoff runs, which inherit no env). Idempotent via
+    BOT_WIRE_MARKER (shipped inside the blurb), backed up (.bak-<ts>) before
+    any append, and fail-open: unreadable templates or unwritable personas
+    report and never fail the install. Profiles WITHOUT a SOUL.md are
+    reported but not touched — inventing a persona file is not this
+    installer's call. Returns status lines for the summary.
+    """
+    out = []
+    if not profiles_dir.is_dir():
+        return [f"  (no profiles directory at {profiles_dir} — nothing to wire)"]
+    profiles = sorted(p for p in profiles_dir.iterdir() if p.is_dir())
+    if not profiles:
+        return [f"  (no profiles in {profiles_dir} — nothing to wire)"]
+    for prof in profiles:
+        soul = prof / "SOUL.md"
+        label = f"{prof.name}/SOUL.md"
+        if not soul.exists():
+            out.append(f"  {label:<34} absent (no persona file — paste the "
+                       "blurb manually if this profile is a bot)")
+            continue
+        try:
+            content = soul.read_text(encoding="utf-8")
+            if BOT_WIRE_MARKER in content:
+                out.append(f"  {label:<34} wired (already present — idempotent skip)")
+                continue
+            blurb = _bot_blurb(prof.name)
+            if dry:
+                out.append(f"  {label:<34} would append the coordination blurb")
+                continue
+            bak = soul.with_name(f"SOUL.md.bak-{stamp()}")
+            shutil.copy2(soul, bak)
+            soul.write_text(content.rstrip("\n") + "\n\n" + blurb,
+                            encoding="utf-8")
+            out.append(f"  {label:<34} wired (appended; previous copy -> {bak.name})")
+        except OSError as exc:
+            out.append(f"  {label:<34} NOT WIRED — {type(exc).__name__}: {exc} "
+                       "(paste manually: examples/bot-soul-coordination.example.md)")
+    return out
+
+
+def wire_profile_memories(profiles_dir: Path, sc: Path, *, dry: bool) -> list:
+    """Wire NON-BOT profiles in: append the standing memory rule to each
+    SOUL-less profile's OWN memory store (<profiles>/<name>/memories/MEMORY.md).
+
+    A profile is a full agent instance with its own memory — the main store's
+    rule never reaches its sessions. Profiles WITH a SOUL.md are bots: the
+    blurb (wire_bots) is their carrier, and wiring memory too would just cost
+    tokens every turn, so they are skipped here. Idempotent/backup/fail-open
+    via wire_memory; the store is created when absent (the profile dir
+    existing IS the fresh-profile case). Returns status lines.
+    """
+    out = []
+    if not profiles_dir.is_dir():
+        return [f"  (no profiles directory at {profiles_dir} — nothing to wire)"]
+    profiles = sorted(p for p in profiles_dir.iterdir() if p.is_dir())
+    if not profiles:
+        return [f"  (no profiles in {profiles_dir} — nothing to wire)"]
+    for prof in profiles:
+        label = f"{prof.name}/memories/MEMORY.md"
+        if (prof / "SOUL.md").exists():
+            out.append(f"  {label:<34} skipped (bot — the SOUL.md blurb is "
+                       "its carrier)")
+            continue
+        mem = prof / "memories" / "MEMORY.md"
+        try:
+            if not dry:
+                mem.parent.mkdir(parents=True, exist_ok=True)
+            status = wire_memory(mem, sc, dry=dry)
+            if dry and status.startswith("no agent memory store"):
+                status = f"would create {mem} with the rule"
+        except OSError as exc:
+            status = (f"NOT WIRED — {type(exc).__name__}: {exc} "
+                      "(paste manually: examples/memory-entry.example.md)")
+        out.append(f"  {label:<34} {status}")
+    return out
 
 
 def default_home() -> Path:
@@ -400,6 +516,18 @@ def main() -> int:
                     help="agent memory store to wire the rule into "
                          "(default: <HERMES_HOME|~/.hermes>/memories/"
                          "MEMORY.md)")
+    ap.add_argument("--no-wire-bots", action="store_true",
+                    help="skip appending the coordination blurb to existing "
+                         "bot profiles' SOUL.md files (see "
+                         "examples/bot-soul-coordination.example.md)")
+    ap.add_argument("--no-wire-profiles", action="store_true",
+                    help="skip wiring the standing memory rule into non-bot "
+                         "profiles' own memory stores "
+                         "(<profiles>/<name>/memories/MEMORY.md)")
+    ap.add_argument("--profiles-dir", type=Path, default=None,
+                    help="profiles directory holding bot profiles "
+                         "(default: <HERMES_HOME|~/.hermes>/profiles, or "
+                         "$HERMES_COORD_PROFILES_DIR)")
     ap.add_argument("--skill-dest", type=Path, default=None,
                     help="skills directory to install the skill bundle into "
                          "(default: <HERMES_HOME|~/.hermes>/skills/"
@@ -477,6 +605,9 @@ def main() -> int:
     memory_file = (args.memory_file if args.memory_file is not None
                    else home / "memories" / "MEMORY.md")
     sc = dest / "session_coord.py"
+    profiles_dir = (args.profiles_dir if args.profiles_dir is not None
+                    else Path(os.environ.get("HERMES_COORD_PROFILES_DIR",
+                                             home / "profiles")).expanduser())
     if rc == 0 and not dry:
         print("\nAgent wiring (standing memory rule):")
         if args.no_wire_memory:
@@ -489,6 +620,29 @@ def main() -> int:
             if status.startswith("NOT WIRED"):
                 print(f"  {WIRE_ENTRY.format(sc=sc)}")
 
+        # 7. wire existing bot profiles in (SOUL.md blurb — bots enroll via
+        # persona, not memory: handoff runs inherit no env, and each bot
+        # needs its own --surface bot:<name>).
+        print("\nBot wiring (SOUL.md coordination blurb):")
+        if args.no_wire_bots:
+            print("  skipped (--no-wire-bots). Blurb for manual paste: "
+                  "examples/bot-soul-coordination.example.md")
+        else:
+            for line in wire_bots(profiles_dir, dry=False):
+                print(line)
+
+        # 8. wire non-bot profiles in (their OWN memory stores — a profile is
+        # a full agent instance; the main store's rule never reaches it).
+        print("\nProfile wiring (standing rule into each profile's own memory):")
+        if args.no_wire_profiles:
+            print("  skipped (--no-wire-profiles). Entry for manual paste: "
+                  "examples/memory-entry.example.md")
+        else:
+            for line in wire_profile_memories(profiles_dir, sc, dry=False):
+                print(line)
+        print("  (profiles/bots created LATER need wiring too — re-run this "
+              "installer; `session_coord.py status` flags unenrolled ones)")
+
         print("\nQuick start:")
         print(f"  ID=$(python3 {sc} register --task 'my task' --surface cli)")
         print(f"  python3 {sc} claim --id \"$ID\" --res file:/some/path")
@@ -497,6 +651,12 @@ def main() -> int:
     elif dry:
         print("\nAgent wiring (dry run):")
         print(f"  {wire_memory(memory_file, sc, dry=True)}")
+        print("\nBot wiring (dry run):")
+        for line in wire_bots(profiles_dir, dry=True):
+            print(line)
+        print("\nProfile wiring (dry run):")
+        for line in wire_profile_memories(profiles_dir, sc, dry=True):
+            print(line)
     return rc
 
 

@@ -43,10 +43,12 @@ Pick one:
    automatically; `--no-wire-memory` skips it; `--memory-file` points at a
    non-default store.
 
-Each `virtualenv`/profile/bot has its own memory: add the entry to **every
-active agent profile** that shares this machine (for bots, paste the bot
-blurb from `bot-soul-coordination.example.md` into their persona instead —
-their memory is profile-scoped).
+Each profile/bot has its own memory: **every active agent profile** that
+shares this machine needs enrollment. `install.py` handles existing ones —
+non-bot profiles get this entry in their own `memories/MEMORY.md`, bots get
+the persona blurb (`bot-soul-coordination.example.md`) instead. For actors
+created after the install, re-run `install.py` (idempotent) or paste
+manually; `session_coord.py status` flags unenrolled/unwired profiles.
 
 ## If you are an agent performing this install
 

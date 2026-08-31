@@ -504,16 +504,16 @@ actors. They compose: single-flight guards re-entrancy, the board guards intent.
 Everything below ships in the repo (`skills/multi-session-coordination/scripts/selftest*.sh`) and is re-runnable in one
 command each; nothing is claimed that a clone cannot re-verify.
 
-**Regression / compatibility / feature suites — 127 checks, all green:**
+**Regression / compatibility / feature suites — 133 checks, all green:**
 
 | Suite | Checks | What it proves |
 |---|---|---|
 | `selftest.sh` (v1 regression) | 28 | Original claim/wait/release/steal/expiry semantics unchanged, plus **id resolution: an 8-char board-display prefix really acts on its session, and a no-match / ambiguous id fails loudly instead of a silent no-op (v2.3.1)**, plus **explicit ids: `register --id` registers under the caller's id and a claim under a never-registered id auto-creates its session row, so no claim is ever orphaned (v2.3.2)** |
 | `selftest_priority.sh` (v2) | 26 | Ranks, fencing, FIFO, lineage, pause/resume, preempt dedupe, urgent alerts, **pinned v1-schema fixture migration** |
-| `selftest_cron.sh` (v2.1+v2.2) | 45 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness** |
-| `selftest_toggle.sh` (v2.3) | 28 | **Master switch**: OFF is a fail-open no-op on every verb (register still yields an id, cron-guard stdout stays empty), ON restores conflict detection, env overrides the sentinel both directions, and the shell guard honors the switch — plus the enabled path proven unchanged by the 99 checks above |
+| `selftest_cron.sh` (v2.1+v2.2+v2.4) | 51 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness**, **enrollment audits: persona-bearing profiles missing the blurb marker flagged UNENROLLED, SOUL-less profiles with an unwired own memory store flagged UNWIRED (both in `--json`), the markers clear them, evidence-less profiles never flagged** |
+| `selftest_toggle.sh` (v2.3) | 28 | **Master switch**: OFF is a fail-open no-op on every verb (register still yields an id, cron-guard stdout stays empty), ON restores conflict detection, env overrides the sentinel both directions, and the shell guard honors the switch — plus the enabled path proven unchanged by the 105 checks above |
 
-**Platforms actually executed, not assumed:** the full 127-check matrix runs green on
+**Platforms actually executed, not assumed:** the full 133-check matrix runs green on
 macOS (Apple Silicon) and Ubuntu Linux (byte-identical file verified by checksum before
 the run). The CLI was additionally executed under real Python 3.8, 3.9, 3.11, 3.12, and
 3.13 interpreters. Hostile-console behavior (C locale / `PYTHONIOENCODING=ascii` with
@@ -592,6 +592,9 @@ python3 install.py --dest /opt/coord/bin --state-dir /var/lib/coord   # custom p
 python3 install.py --seed-manifest # also drop an example cron manifest if none exists
 python3 install.py --no-wire-memory          # scripts only — skip the memory entry
 python3 install.py --memory-file ~/.hermes/memories/MEMORY.md   # explicit store target
+python3 install.py --no-wire-bots            # skip the bot SOUL.md blurb step
+python3 install.py --no-wire-profiles        # skip wiring non-bot profiles' own memory
+python3 install.py --profiles-dir ~/.hermes/profiles   # explicit profiles dir
 ```
 
 Re-running is safe: an existing install is upgraded in place (unchanged files
@@ -626,8 +629,33 @@ STANDING RULE — session-coord (wire v1): ALWAYS deconflict via the coordinatio
 Note: the `hermes memory` CLI configures the external memory *provider* — it
 does **not** add entries. The supported paths are asking the agent (it has a
 memory tool), editing the file, or letting `install.py` do it. Every active
-agent profile on the machine needs a copy (for bots, the persona blurb in
-`bot-soul-coordination.example.md` is profile-scoped enrollment instead).
+agent profile on the machine needs a copy.
+
+### 8.2 Bots and profiles — wired automatically, audited by `status`
+
+**Bots** can't be enrolled through memory (their handoff runs load only the
+persona file), so `install.py` appends the coordination blurb
+(`templates/bot-soul-coordination.md`, `<botname>` substituted, marker
+`session-coord (bot-wire v1)`) to every existing `profiles/*/SOUL.md` —
+idempotent, backed up, `--no-wire-bots` to skip, `--profiles-dir` to point
+elsewhere. Profiles without a SOUL.md are never given one.
+
+**Non-bot profiles** are full agent instances with their OWN memory stores —
+the main store's rule never reaches their sessions. The installer appends the
+standing rule to each SOUL-less profile's
+`<profiles>/<name>/memories/MEMORY.md` (created if absent;
+`--no-wire-profiles` to skip). Bot profiles are skipped here: the blurb is
+their carrier, and double-wiring would cost tokens every turn.
+
+Actors created **after** the install still need wiring (re-run `install.py`,
+or paste the blurb / memory entry) — and the board tells you when one is
+missing: `session_coord.py status` lists persona-bearing profiles lacking the
+blurb marker under `— UNENROLLED bot profiles` (`unenrolled_bot_profiles` in
+`--json`), and SOUL-less profiles whose existing memory store lacks the
+standing rule under `— UNWIRED profiles` (`unwired_profiles`). Store-less
+fresh profiles are never flagged — an existing store proves agent sessions
+run there; absence of one is no evidence. An unenrolled actor is invisible to
+coordination; the audits make that visible before it costs you a clobber.
 
 **If you are an agent performing this install:** run `install.py`, then add
 the entry above to your own memory store verbatim (adjusting the script path
