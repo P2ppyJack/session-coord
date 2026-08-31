@@ -11,11 +11,11 @@ metadata:
     related_skills: [github-repo-management, github-issues, github-code-review, github-issue-to-pr]
 ---
 <!-- EDIT HISTORY (newest first; max ~5 entries, older -> references/edit-history.md)
+2026-08-31 | claude-fable-5 | anthropic | desktop session | Session lessons (docs-only): Pitfalls gains TTL sizing/re-claim guidance (two 90m leases silently expired across ~2h of connection outages during the v2.4.0 pass — claim --ttl 240+ for long work, idempotent re-claim after interruptions, status-check before resuming). publishing-and-ci.md gains the tokenless-GitHub-Release-via-Chrome recipe (osascript JXA over browser_exec — the latter hung to 420s timeout twice; REST-verify the release) + poll-CI-from-terminal-not-execute_code (300s kernel timeout killed a polling loop).
 2026-08-31 | claude-fable-5 | anthropic | desktop session | v2.4.0 BOT ENROLLMENT hardening (Toby spotted the exemption-wording hazard): (1) blurb exemption tightened — "your OWN profile's memory" was blurrable into "things I made need no claim"; now names the EXACT profile-internal list, states self-created files in shared space still need claims, and disambiguates profile memory vs the machine's main memory store (template + example). (2) install.py step 7 wire_bots(): appends the blurb (marker "session-coord (bot-wire v1)") to every existing profiles/*/SOUL.md — default ON, --no-wire-bots/--profiles-dir; closes the each-new-bot-needs-a-manual-paste gap for existing bots. (3) status audits enrollment: persona-bearing profiles missing the marker -> UNENROLLED warning (+ unenrolled_bot_profiles in --json). (4) NON-BOT profiles (Toby spotted this gap too): a profile is a full agent instance whose own memory store the main rule never reaches — install.py step 8 wires the standing rule into each SOUL-less profile's memories/MEMORY.md (--no-wire-profiles), and status flags unwired ones (existing store without the rule; store-less = no evidence, never flagged). selftest_cron.sh 45->51 (133 total); CI wiring smoke step covers both legs.
 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: repo restructured to the Hermes skill layout (skills/multi-session-coordination/ with SKILL.md + references/ + templates/ + scripts/ + examples/) so `hermes skills install` / tap / direct-URL installs work; frontmatter brought to house standards (author human-first, platforms audited to [linux, macos], description <= 60 chars); body re-ordered to When to Use / Prerequisites / How to Run / Quick Reference / Procedure / Pitfalls / Verification with Hermes-tool framing; install.py gains a skill-bundle install step (--skill-dest / --no-skill); tool location made path-robust (install.py vs skill-bundle installs).
 2026-08-30 | claude-opus-4-8 | anthropic | defaults | Procedural quality-review pass (all custom skills): verified against live vendor docs/GitHub via browse-as-me + web, checked for supersession by official bundled skills, spot-checked cited paths/crons/config on-disk. Verdict: current.
 2026-08-26 | deepseek-v4-flash | custom | desktop session | WIRE-IN DOCS: new "Wiring it in" section — the standing memory rule is the missing always-call carrier (install.py now writes it by default, marker 'session-coord (wire v1)', --no-wire-memory/--memory-file; canonical entry + delivery paths in repo examples/memory-entry.example.md). Laura-install gap: scripts+skill install ≠ enrollment. Toby's own memory now carries the rule (verified §-delimited, marker=1).
-2026-08-26 | deepseek-v4-flash | custom | cli session | GitHub participation: related_skills frontmatter + repo-owner pointer block (bundled github-repo-management/github-issues/github-code-review/github-issue-to-pr) — session-coord is Toby's public repo, not just a port target
 -->
 
 # Multi-Session Coordination Skill
@@ -280,6 +280,13 @@ ON. The shell guard honors it without spawning Python.
   tick.
 - Scheduled-fire ETAs come from the cron store's `next_run_at`; a sleeping machine
   pushes reality later — treat ETAs as earliest-case.
+- **Size `--ttl` to the task, and re-claim after outages.** The default TTL (90 min)
+  can silently expire mid-task when a long pass is stretched by network drops or user
+  pauses — waiters get EXPIRED warnings and your eventual `done` reports "(nothing
+  held)". For multi-hour work claim with `--ttl 240`+; after any long interruption
+  re-issue the same `claim` under your id (idempotent) to refresh the lease, and check
+  `status` before resuming writes in case a co-worker claimed in the gap. (Bit the
+  v2.4.0 release pass: ~2 h of interruptions outlived two 90 m leases.)
 - Board unreadable (disk full, corrupt DB): tool fails open with a stderr WARNING —
   treat as "flying blind", tell the user, avoid shared-resource mutation until resolved.
 - **Platforms:** the engine is cross-platform Python (CI-verified on Windows via Git
