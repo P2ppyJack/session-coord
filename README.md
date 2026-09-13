@@ -1,732 +1,517 @@
-# session-coord — cooperative coordination for concurrent AI agent sessions
+# session-coord — cooperative coordination for concurrent agents
 
 [![tests](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml/badge.svg)](https://github.com/P2ppyJack/session-coord/actions/workflows/tests.yml)
 
-**One machine. Several AI agent sessions. Subagent fan-outs. Scheduled cron jobs.
-Named bots with their own sub-sessions and routines. All touching the same files,
-skills, GPU boxes, and state — at the same time.**
+`session-coord` is a dependency-free SQLite intention board for concurrent agent
+sessions, subagents, bots, and scheduled jobs that share one machine. Actors
+register, claim resources for a task, wait or yield when another actor is ahead,
+and notify waiters on release. The board is advisory: it coordinates intent but
+does not intercept file or process operations.
 
-`session-coord` is a small, dependency-free SQLite-backed **session-deconfliction**
-board plus a CLI
-(`session_coord.py`) and a zero-token cron guard (`coord_guard.sh`) that let all of those
-actors behave like **polite co-workers instead of competitors**: they announce what they
-are working on, wait for each other, hand resources over in priority order, and never
-silently clobber each other's work.
+The board and its CLI are framework-neutral. The repository also contains a
+standard Hermes skill bundle and an **optional, unreleased** setup helper for a
+separately supplied Hermes native-continuation plugin.
 
-It was built for [Hermes Agent](https://github.com/NousResearch/hermes-agent) sessions,
-but the design is agent-framework-agnostic: anything that can run a CLI before touching a
-shared resource can participate.
+## Why this update
 
----
+Concurrent agents can overwrite the same files, race on a shared service, or
+resume from a checkpoint after another actor has changed the resource. A lock
+alone does not tell a stopped conversation when it is safe to continue.
 
-## Quick start — install & deconflict
+This update separates **who may work** from **how a conversation resumes**:
 
-**Install as an official Hermes skill** (the repo ships the standard
-`skills/multi-session-coordination/` layout — pick any one):
-
-```bash
-# direct GitHub install (no tap needed)
-hermes skills install P2ppyJack/session-coord/skills/multi-session-coordination
-
-# ...or subscribe as a tap, then install by slug
-hermes skills tap add P2ppyJack/session-coord
-hermes skills install P2ppyJack/session-coord/multi-session-coordination
-
-# ...or straight from the raw SKILL.md URL
-hermes skills install https://raw.githubusercontent.com/P2ppyJack/session-coord/main/skills/multi-session-coordination/SKILL.md
-```
-
-**Full wiring in one command** (CLI in `~/.hermes/scripts/` + the skill bundle +
-the standing memory rule that makes every agent actually check the board):
-
-```bash
-git clone git@github.com:P2ppyJack/session-coord.git && cd session-coord
-python3 install.py          # --check for a dry run
-```
-
-**Try it:**
-
-```bash
-python3 ~/.hermes/scripts/session_coord.py status
-ID=$(python3 ~/.hermes/scripts/session_coord.py register --task "my task" --surface cli)
-python3 ~/.hermes/scripts/session_coord.py claim --id "$ID" --res file:~/project --wait
-python3 ~/.hermes/scripts/session_coord.py done --id "$ID"
-```
-
-Details, policies, and rationale: §8 (install), §9 (command tour), §1–§3 (mechanisms).
-
----
-
-## Table of contents
-
-1. [The problem, narrated](#1-the-problem-narrated)
-2. [Design philosophy — the five rules everything follows](#2-design-philosophy)
-3. [The protection logic, mechanism by mechanism](#3-the-protection-logic)
-   - 3.1 Claims: task-scoped, atomic, advisory
-   - 3.2 Waiting politely (and cheaply)
-   - 3.3 Crash safety: TTLs, reaping, stale sessions
-   - 3.4 Human-set priority — and why agents cannot set it
-   - 3.5 Preemption that never destroys work
-   - 3.6 Pause / resume with checkpoints
-   - 3.7 Fencing: why a *free* resource can still say "not yet"
-   - 3.8 Fairness: FIFO tie-breaks, liveness gates
-   - 3.9 Subagent lineage: family priority that re-ranks live
-   - 3.10 The urgent-alert channel
-   - 3.11 Steal — the break-glass path
-   - 3.12 Cron jobs as first-class co-workers
-   - 3.13 The zero-token cron guard
-   - 3.14 Critical crons: never defer silently
-   - 3.15 Responsibility tracking: a paused job must be somebody's problem
-   - 3.16 Bots (concurrent named agents) and inter-bot deconfliction
-4. [Threat-model summary table](#4-threat-model-summary)
-5. [What this deliberately is NOT](#5-what-this-deliberately-is-not)
-6. [Quality: how this was tested and scanned](#6-quality-testing-and-scans)
-7. [Compatibility and migration policy](#7-compatibility-and-migration)
-8. [Install and quick start](#8-install-and-quick-start)
-9. [Command tour](#9-command-tour)
-
----
-
-## 1. The problem, narrated
-
-Modern agent setups stop being "one chat window" very quickly. A realistic afternoon:
-
-- A **desktop session** is refactoring a shared helper script.
-- A **second session** (started from a phone) wants to update the *same* skill's docs.
-- The desktop session **fans out subagents**, each with its own terminal.
-- At 23:00 a **nightly backup cron** wants to tar up the very directory being refactored.
-- A **cost watchdog cron** wants to scale down the same GPU fleet another session is
-  deliberately pre-warming.
-
-The storage layer underneath (SQLite WAL, atomic file writes) keeps individual writes
-from corrupting — but nothing coordinates **intent**. Nobody knows what anybody else is
-*working on*. The failure modes are silent and expensive:
-
-- Two sessions edit one file; the slower writer wins; the faster session's work vanishes.
-- A backup archives a half-rewritten script tree.
-- A watchdog "helpfully" tears down infrastructure another session just paid to warm up.
-- Two sessions drive the same GPU box into memory exhaustion.
-
-Every one of those is a *collision of intentions*, not of bytes. `session-coord` is an
-intention board: cheap to consult, safe to ignore in an emergency, and rich enough to
-encode priority, hand-offs, pausing, and scheduled (cron) actors.
-
-## 2. Design philosophy
-
-Five rules shaped every mechanism below. When a design decision looks odd, one of these
-is usually the reason.
-
-**Rule 1 — Co-workers, not lock cops.** The board is *advisory*. It never wraps your
-syscalls, never intercepts writes, never makes you deadlock against a kernel object. A
-claim is a public statement, a queue position, and a promise of notification — like
-telling the office "I'm in the conference room until 3". Cooperation is enforced by the
-agents' shared protocol (check before touching; wait when held), not by force. This keeps
-the failure domain tiny: the worst a broken board can do is *not help*.
-
-**Rule 2 — Fail-open, always.** A coordination system that can block real work during its
-own outage is worse than none. Every integration point degrades to "proceed as if the
-board didn't exist": the cron guard proceeds if the DB is corrupt or the CLI missing; a
-malformed cron manifest makes the cron features inert; advisory lookups that fail print
-nothing rather than raising. **A broken board must never block a backup.**
-
-**Rule 3 — Authority stays human.** Agents *cannot* rank themselves. Priority ranks enter
-the system through exactly one door — the human operator (`prioritize`). An unranked
-session cannot preempt anything; a ranked one only preempts strictly-lower ranks. Without
-this rule, every agent eventually decides its own task is the important one; with it, the
-board is an instrument of the user's judgment, not the agents'.
-
-**Rule 4 — Never lose finished work.** Preemption is a *request*, not a seizure. The
-holder is asked to checkpoint, pause, and yield; the paused session keeps a reserved
-resume spot and its checkpoint note comes back verbatim on resume. Long-running work is
-expected to be checkpoint-safe, and the board's job is to make yielding *cheap*, so that
-being polite is never punished with lost progress.
-
-**Rule 5 — Zero tokens for decisions that need no judgment.** Anything decidable by pure
-logic runs as plain bash/Python *before* any LLM spins up. The cron guard is a sourced
-shell snippet: a conflicted agentic cron job defers before the model ever loads —
-deterministic, auditable, and free.
-
-## 3. The protection logic
-
-### 3.1 Claims: task-scoped, atomic, advisory
-
-A session `register`s (getting a short id), then `claim`s the resources its **current
-task** needs, and `release`s them (or calls `done`) when that task finishes — not when
-the session ends. Task scoping matters because agent sessions are long-lived and do many
-unrelated things; holding "everything I've ever touched" would starve the rest of the
-office.
-
-Resource keys are a small taxonomy rather than free text, so different actors naming the
-same thing collide correctly:
-
-| Key form | Meaning |
-|---|---|
-| `file:/path` | A file — or a directory, which covers everything under it |
-| `skill:<name>` | An agent skill (docs + scripts treated as one unit) |
-| `memory` | The agent's persistent memory store |
-| `ui:desktop` | The desktop UI (only one actor should drive it) |
-| `box:<host>` | A whole machine (GPU box) for mutating work |
-| `cron-store` | The cron job registry itself |
-
-Paths are canonicalized (symlinks, `~`, case-insensitive filesystems, Windows drive/UNC
-forms) so `file:~/x` and `file:/home/u/x` are the same claim.
-
-**Multi-resource claims are atomic all-or-nothing.** If a task needs three resources and
-one is held, it acquires *none* of them. Partial acquisition is how two sessions end up
-each holding half of what the other needs — the classic deadly embrace. Refusing partial
-grants makes that impossible at the granularity the board controls.
-
-Claims are **exclusive by default**, with a shared/read mode for co-reading. Return codes
-follow sysexits: `0` = claimed, `75` (`EX_TEMPFAIL`) = busy-try-later. Scripts branch on
-the code; humans read the text.
-
-### 3.2 Waiting politely (and cheaply)
-
-When a claim is refused, the output names the holder, its task, and *when the claim
-expires* — enough for the refused session to make an informed choice. `claim --wait`
-registers you as a **waiter** and polls internally (single CLI invocation, ~4 s cadence)
-until the resource frees or a timeout hits. One tool call, no token-burning retry loops
-by the calling LLM.
-
-When a holder releases, every waiter gets an inbox **notification** ("released by
-co-worker, you may claim now") — the concrete implementation of "ask the other session
-to let you know when it's done". The inbox (`inbox --id`) is a read-once ledger: unread
-notifications are printed, marked read, and gone from the urgent path.
-
-### 3.3 Crash safety: TTLs, reaping, stale sessions
-
-Sessions crash, laptops sleep, terminals get closed. Nothing on the board may outlive its
-usefulness:
-
-- Every claim carries a **TTL** (default 90 min, settable per claim). Expired claims are
-  reaped lazily by any board touch, with an `EXPIRED` notification to the former holder.
-- Sessions unseen for 24 h are marked stale and their claims released.
-- Notification history is pruned after 7 days.
-
-Lazy reaping (on next board touch) instead of a daemon keeps the system daemon-free —
-there is nothing to install, supervise, or forget to restart. The cost — expiry can be
-noticed a little late — is acceptable for advisory coordination.
-
-### 3.4 Human-set priority — and why agents cannot set it
-
-`prioritize --order "sessA=1,sessB=2"` records the **user's** ranking. Ranks are
-lexicographic tuples: `1 < 1a < 1b < 2 < unranked`. Everything downstream (queue
-ordering, fencing, preemption rights) derives from this one table.
-
-The deliberate omission is the point: **there is no API for a session to rank itself.**
-`preempt` hard-refuses requesters without a user-recorded rank. This single rule prevents
-the entire class of "agents negotiating importance with each other" failure modes —
-politeness collapses quickly when every actor claims to be the priority.
-
-When ranks change, every session whose *effective* rank moved — including children who
-inherited the change through a parent (§3.9) — gets a `PRIORITY UPDATE` notification, so
-nobody acts on a stale picture of the pecking order.
-
-### 3.5 Preemption that never destroys work
-
-`preempt --id <ranked-session> --res <resource>` does **not** take anything. It:
-
-1. Verifies the requester outranks the holder (else refuses, listing who refused).
-2. Sends the holder a `USER-PRIORITY REQUEST` notification asking it to checkpoint,
-   pause, and yield.
-3. Registers the requester as a waiter — queued in rank order like everyone else.
-4. Deduplicates: repeated preempts against the same holder/resource don't spam the inbox.
-
-The holder yields *at a safe point* (that's what checkpoints are for), so preemption
-cannot corrupt half-written state. And because crons are not interactive co-workers,
-`preempt` refuses to target a cron holder outright — pausing a scheduled job is a
-scheduler operation requiring user approval (§3.14), not a peer negotiation.
-
-### 3.6 Pause / resume with checkpoints
-
-`pause --id H --note "<checkpoint>"` flips H's held claims to *paused*: they stop
-blocking others, but H keeps a **reserved resume spot** in the queue and the board stores
-the checkpoint note. Other waiters are told the resource freed and that H will resume
-after them. `resume --id H` re-acquires **all** paused claims atomically (respecting
-current holders and fencing), then prints the checkpoint note back verbatim: *"Your
-checkpoint from pause: …"* — the session picks up exactly where it left off.
-
-Paused claims still expire (TTL from pause time) with a warning notification — a resume
-spot is a courtesy, not a permanent lien. If the spot lapses, resume says so honestly
-instead of pretending.
-
-### 3.7 Fencing: why a *free* resource can still say "not yet"
-
-The subtlest protection, and the one that makes priority real. Consider: a high-priority
-session is waiting for `file:X`; the holder releases; but before the waiter's next poll
-tick, an unrelated low-priority session claims `file:X`. Rank meant nothing — the race
-went to whoever polled luckiest.
-
-Fencing closes that gap: a claim on a **free** resource is refused (`QUEUED`, rc 75) when
-another *live, actively-polling* waiter with **strictly better rank** — or equal rank and
-earlier queue position — is waiting for it in a conflicting mode. The release boundary
-honors the queue, not the poll lottery.
-
-Two guardrails keep fencing honest:
-
-- **Liveness (30 s):** only waiters whose poll heartbeat is fresh can fence. A crashed
-  waiter stops fencing within half a minute — the dead must not block the living. (Paused
-  sessions' resume spots are exempt: they are *supposed* to be quiet.)
-- **Queue order survives releases:** waiter rows deliberately stay active across the
-  release so rank + FIFO ordering carries over the boundary. This was validated by an
-  adversarial review that caught the original implementation dropping rank order at
-  exactly that point (§6).
-
-### 3.8 Fairness: FIFO tie-breaks
-
-Equal-rank waiters acquire in first-come-first-served order, and unranked sessions are
-simply the last tier of the same ordering. Combined with fencing this yields a total,
-starvation-free order: rank first, then arrival time. A lower-priority session is never
-starved *by accident* — only ever explicitly out-ranked by the human.
-
-### 3.9 Subagent lineage: family priority that re-ranks live
-
-Orchestrator sessions fan out subagents. Children register with `--parent <id> --slot a|b|…`
-and get **derived ranks**: parent rank 1 → children `1a`, `1b` — ordered within the
-family by the parent's slot assignment, and the whole family sits between rank 1 and
-rank 2. Two properties matter:
-
-- **A parent outranks its own children** (the orchestrator can always reclaim a resource
-  from its workers).
-- **Derivation is live.** Re-ranking the parent to 3 instantly makes the children
-  effectively `3a`, `3b` — no re-registration, and every child whose effective rank moved
-  is notified. The user re-ranks one id; the whole tree follows.
-
-### 3.10 The urgent-alert channel
-
-A busy session might not read its inbox for a long stretch. So any board touch
-(`claim`/`check`/`release`/`status`) by a session with unread `preempt_request` or
-`priority` notifications prints `⚠ N urgent notification(s) pending` — on **stderr**, so
-it never corrupts machine-parsed stdout. The next natural board interaction surfaces the
-urgency; no polling loop needed.
-
-### 3.11 Steal — the break-glass path
-
-`steal` force-releases someone else's claim. It exists because humans sometimes must
-override (a hung session holding the deploy path at 2 a.m.). It is loud by design: the
-victim gets a notification naming who stole what and why, and the action is labeled
-`FORCE-RELEASED` in output. The protocol treats it as an incident, not a tool of first
-resort — everyday flow is preempt → pause → resume.
-
-### 3.12 Cron jobs as first-class co-workers
-
-Scheduled jobs are sessions that nobody is watching. Left out of coordination, they are
-the perfect clobbering machine: they fire at fixed times, with no awareness, into
-whatever state the interactive sessions left. `session-coord` brings them onto the board
-from both directions:
-
-- **Sessions see crons coming.** A manifest (`cron_resources.json`) declares which
-  resources each cron job touches, its guard policy, and whether it is *critical*. When a
-  session claims a resource a cron will want, the claim output appends a **CRON
-  ADVISORY**: which job, when it fires, what clashes. `status` shows a 12-hour cron radar
-  with conflict flags. No surprises at 23:00.
-- **Crons see sessions.** When a cron fires, its guard (§3.13) checks the board; if an
-  interactive session holds what the job needs, the job defers or skips — and drops a
-  polite inbox note to the holder: *"cron '<name>' fired, found you holding <resource>,
-  politely skipped this tick."*
-- Crons appear on the board as `[CRON JOB]` holders, `preempt` refuses to target them,
-  and every guard decision is written to a `cron_events` audit table.
-- **Fail-open (Rule 2):** no manifest, malformed manifest, missing DB → cron features are
-  inert and jobs run exactly as before.
-
-### 3.13 The zero-token cron guard
-
-`coord_guard.sh` is sourced as **step 0** of a cron wrapper script:
-
-```bash
-source ~/.hermes/scripts/coord_guard.sh   # exits 75 (deferred) on conflict
-```
-
-It is deterministic shell + one Python CLI call — the decision to defer happens **before
-any LLM starts**, so a conflicted agentic job costs zero tokens to skip. Policies are
-per-job: a backup *waits* up to 15 minutes for the holder to finish (backups should
-eventually run); a fleet watchdog *skips instantly* (it will tick again in minutes; a
-session deliberately holding the fleet is exactly when the watchdog must not act). Every
-defer/skip/run is audited in `cron_events`, and the guard proceeds on ANY internal error.
-
-### 3.14 Critical crons: never defer silently
-
-Some jobs must not quietly miss a tick (the nightly backup being the canonical case). The
-manifest marks them `critical`, and the claim-time advisory switches from informational
-to a **decision brief** addressed to the session (and through it, the user):
-
-> This is a CRITICAL job — do NOT let it defer silently. Choose: **(a)** finish & release
-> before it fires, **(b)** `wait-for-cron --job <id>` (block until it has run), **(c)**
-> pause the job — *with the user's approval* — booked via `cron-note`, **(d)** trigger it
-> early. Ask the user which.
-
-Options that change the schedule (pause, trigger-early) explicitly route through human
-approval — Rule 3 again. `wait-for-cron` gives the opposite direction: the session parks
-itself until the job's fire is observed in `cron_events`, then continues.
-
-### 3.15 Responsibility tracking: a paused job must be somebody's problem
-
-The most dangerous state in scheduled automation is *paused and forgotten* — a paused
-job does not fire **at all**. So pausing a cron through this protocol books the
-responsibility on the board (`cron-note`): who paused it, why, and that resuming is owed.
-When that session later calls `done`, the board checks the ledger and **nags**: it lists
-any cron the session noted `paused` but never `resumed`, refusing to let the departure be
-silent. The failure mode is reduced from "backup silently off for a month" to "impossible
-to walk away without being told".
-
-### 3.16 Bots (concurrent named agents) and inter-bot deconfliction
-
-Some agent stacks run **named persistent agents** ("bots") side by side: each bot is a
-full profile with its own memory, sessions, and — crucially — its own cron store of
-scheduled routines (`<profiles>/<bot>/cron/jobs.json`). Bots spawn sub-sessions
-(bot-to-bot handoffs run as fresh CLI invocations) and message each other, which
-multiplies the concurrency without adding any built-in collision control.
-
-`session-coord` treats bots as ordinary co-workers, and the coverage is **inter-bot by
-construction**: there are no per-bot scopes. One shared board sees every actor —
-interactive sessions, subagents, cron guards, every bot, and every bot-spawned
-sub-session. Bot A's `claim`/`status`/exit-75 sees bot B's holds identically to a
-human session's. Three mechanisms make bots first-class:
-
-- **Per-profile cron radar.** The store scanner merges the default cron store with
-  every profile store (`HERMES_COORD_PROFILES_DIR`, default `~/.hermes/profiles`).
-  A bot's routines surface in the radar, claim advisories, and the zero-token guard
-  exactly like default-store jobs. Id collisions resolve default-store-first; a
-  corrupt profile store contributes nothing (Rule 2: fail-open).
-
-  *Field note (live deployment):* the radar reads **schedules, not run health** — a
-  routine can show as scheduled while every fire has failed (the store's
-  `last_status`/`failure_streak` are where health lives; check them when a radar
-  entry matters to your decision). One concrete trap: schedulers typically resolve
-  a routine's bare `script:` filename against the **owning profile's** scripts
-  directory, not a shared one — a bot routine whose script sits in the default
-  scripts dir fails only at fire time, invisibly to the radar. Deploy the script
-  into the bot's own profile and verify with one live fire, not by reading the
-  schedule.
-- **Attribution everywhere.** Profile jobs are tagged `[bot:<profile>]` at load time,
-  so every advisory, defer note, and radar row names the owning bot with no extra
-  lookups. Bots register with `--surface bot:<name>` so board rows and HELD messages
-  identify them.
-- **Protocol by prompt, not by env.** Bot handoff runs inherit no environment, so the
-  coordination protocol travels in the bot's standing prompt/persona file (the same
-  way subagents receive it). Chat between bots is *negotiation* — ask a holder's ETA,
-  request early release, offer to batch work — but **chat is never a lock**: only a
-  successful claim authorizes mutation, because messages are neither atomic nor able
-  to interrupt a mid-turn bot. Ranks stay human-set; bots never self-prioritize.
-
-The exact enrollment texts ship in the repo so you don't have to reinvent them:
-[`skills/multi-session-coordination/examples/bot-soul-coordination.example.md`](skills/multi-session-coordination/examples/bot-soul-coordination.example.md)
-(paste into a bot's persona) and
-[`skills/multi-session-coordination/examples/subagent-prompt.example.md`](skills/multi-session-coordination/examples/subagent-prompt.example.md)
-(paste into a fan-out child's prompt).
-
-### 3.17 The master switch: turn coordination off without uninstalling
-
-Coordination is *cooperative* — valuable when several actors share a machine,
-pure overhead when you are the only one running. Rather than force an
-uninstall, the whole layer has a single **master switch** that makes every verb
-a fail-open no-op while leaving the code, the board data, and the cron wiring
-exactly in place.
-
-```bash
-session_coord.py switch            # report state + what is deciding it
-session_coord.py disable           # turn the whole board OFF (persistent)
-session_coord.py enable            # turn it back ON
-session_coord.py switch toggle     # flip it
-```
-
-**What OFF means.** While disabled, every coordination verb short-circuits to a
-friendly no-op that *never blocks a caller* and preserves each verb's stdout
-contract, so a disabled board behaves exactly like "coordination was never
-installed": `register` still prints a synthetic id (so `ID=$(… register)`
-scripts keep working), `claim`/`check` return success/FREE, and — critically —
-`cron-guard` emits empty stdout so the shell guard reads "no id → run
-unguarded." The switch-management verbs (`switch`/`enable`/`disable`) always
-run, so you can never lock yourself out.
-
-**Two layers, one decision.** The Python CLI and the shell cron guard
-(`coord_guard.sh`) read the switch through **identical precedence**, and the
-guard does it *without spawning Python* (zero cost when off):
-
-1. **`HERMES_COORD_DISABLED`** (environment) — an explicit override in **both**
-   directions, scoped to one process tree. Truthy (`1`, `true`, `yes`, `on`, or
-   any other non-empty value) forces OFF; `0`/`false`/`no`/`off` forces ON.
-   Ideal for a one-shot run or a test: `HERMES_COORD_DISABLED=1 ./my-wrapper.sh`.
-2. **Sentinel file** (`~/.hermes/state/coordination_disabled`, override with
-   `HERMES_COORD_DISABLED_FILE`) — the persistent switch that `disable`/`enable`
-   write and remove. This is what survives reboots.
-3. **Default: ON.** Absent both, coordination is enabled.
-
-Because the guard honors the same sentinel, disabling coordination instantly
-makes every cron wrapper run unguarded too — the switch is genuinely global,
-not merely session-scoped. `switch` reports exactly which of the three is
-currently deciding, and warns if an env override is masking your sentinel.
-
-## 4. Threat-model summary
-
-| Failure mode (without coordination) | Protection (section) |
-|---|---|
-| Two sessions edit the same file/skill; last writer wins | Claims + check-before-touch protocol (3.1) |
-| A session never checks the board, so the advisory protocol has no sting | Standing memory entry wired at install time — injected into every session, every turn (8.1) |
-| Token-burning retry loops while waiting | Single-call `--wait` polling + release notifications (3.2) |
-| Crashed session holds resources forever | TTL reaping, stale-session cleanup (3.3) |
-| Agents self-declare importance | User-only ranks; unranked preempt refused (3.4) |
-| Preemption corrupts half-written work | Request→checkpoint→pause→yield flow (3.5, 3.6) |
-| High-priority waiter loses the release race to a lucky poller | Fencing at the release boundary (3.7) |
-| Dead waiter blocks the living | 30 s poll-freshness liveness gate (3.7) |
-| Equal-priority starvation | FIFO tie-break (3.8) |
-| Subagent swarm outranks or fights its orchestrator | Lineage ranks, parent-beats-child, live inheritance (3.9) |
-| Busy session misses a preempt request | stderr urgent-alert on any board touch (3.10) |
-| Hung session at 2 a.m. | `steal` break-glass, loud + audited (3.11) |
-| Cron fires into a session's half-done work | Zero-token guard defers/skips + polite note (3.12, 3.13) |
-| Session's work destroyed by a scheduled job it never saw coming | Claim-time cron advisories + 12 h radar (3.12) |
-| Critical job silently misses its window | Critical decision brief, user-in-the-loop (3.14) |
-| Paused cron forgotten forever | Responsibility ledger + done-time nag (3.15) |
-| Concurrent bots race each other's (or a session's) work | One shared board, no per-bot scopes; protocol in the bot's standing prompt (3.16) |
-| A bot's scheduled routine fires unseen from its private cron store | Per-profile store merge + `[bot:]`-attributed radar/advisories/guard (3.16) |
-| Bots "agree" in chat, then both mutate | Chat is negotiation, never a lock: only a claim authorizes mutation (3.16) |
-| Coordination is pure overhead for a solo operator, tempting a risky uninstall | Master switch: fail-open no-op, code/data/wiring left in place (3.17) |
-| Coordination system itself breaks | Fail-open everywhere; guard proceeds on any error (Rule 2) |
-
-## 5. What this deliberately is NOT
-
-- **Not mandatory locking.** A rogue process that never consults the board is not
-  stopped. The trust model is *cooperating agents on one user's machine* — the board
-  removes accids, not adversaries.
-- **Not distributed.** One machine, one SQLite file (WAL). Multi-host coordination is a
-  different problem with different failure modes.
-- **Not a scheduler.** It coordinates *around* your cron system; it never fires jobs
-  itself (trigger-early is delegated to your scheduler, with user approval).
-- **Not a daemon.** Nothing runs in the background; all maintenance is lazy, on board
-  touches.
-
-Complementary prior art: mkdir-atomic single-flight locks (mutual exclusion of one job
-with itself) still apply *inside* a job; `session-coord` coordinates *across* different
-actors. They compose: single-flight guards re-entrancy, the board guards intent.
-
-## 6. Quality: testing and scans
-
-Everything below ships in the repo (`skills/multi-session-coordination/scripts/selftest*.sh`) and is re-runnable in one
-command each; nothing is claimed that a clone cannot re-verify.
-
-**Regression / compatibility / feature suites — 133 checks, all green:**
-
-| Suite | Checks | What it proves |
+| Layer | Responsibility | Why it stays separate |
 |---|---|---|
-| `selftest.sh` (v1 regression) | 28 | Original claim/wait/release/steal/expiry semantics unchanged, plus **id resolution: an 8-char board-display prefix really acts on its session, and a no-match / ambiguous id fails loudly instead of a silent no-op (v2.3.1)**, plus **explicit ids: `register --id` registers under the caller's id and a claim under a never-registered id auto-creates its session row, so no claim is ever orphaned (v2.3.2)** |
-| `selftest_priority.sh` (v2) | 26 | Ranks, fencing, FIFO, lineage, pause/resume, preempt dedupe, urgent alerts, **pinned v1-schema fixture migration** |
-| `selftest_cron.sh` (v2.1+v2.2+v2.4) | 51 | Guard defer/skip/fail-open, advisories, radar conflict flags, `wait-for-cron` fire detection, pause ledger + done-time nag, **bot leg: profile-store merge, `[bot:]` attribution, collision precedence, corrupt-store inertness**, **enrollment audits: persona-bearing profiles missing the blurb marker flagged UNENROLLED, SOUL-less profiles with an unwired own memory store flagged UNWIRED (both in `--json`), the markers clear them, evidence-less profiles never flagged** |
-| `selftest_toggle.sh` (v2.3) | 28 | **Master switch**: OFF is a fail-open no-op on every verb (register still yields an id, cron-guard stdout stays empty), ON restores conflict detection, env overrides the sentinel both directions, and the shell guard honors the switch — plus the enabled path proven unchanged by the 105 checks above |
+| Standalone board and skill | Atomic resource claims, priorities, queues, checkpoints, and durable wake records | Useful without Hermes or a plugin; no model or network dependency for board operations |
+| Optional `session-coord-native` plugin | Match a wake to the exact profile/session and track receiver receipts | Host-specific delivery can be added, upgraded, or removed without deleting coordination state |
+| Proposed generic Hermes host interface | Admit plugin-supplied work at an idle turn boundary, with cancellation and session fencing | Reusable by other plugins; no board-specific logic or new model tool in core |
+| Separate joined-delegation option | Run children in parallel but return to the parent only after all outcomes arrive | Prevents premature integration without serializing independent child work |
 
-**Platforms actually executed, not assumed:** the full 133-check matrix runs green on
-macOS (Apple Silicon) and Ubuntu Linux (byte-identical file verified by checksum before
-the run). The CLI was additionally executed under real Python 3.8, 3.9, 3.11, 3.12, and
-3.13 interpreters. Hostile-console behavior (C locale / `PYTHONIOENCODING=ascii` with
-non-ASCII task names) degrades to `?` placeholders instead of crashing. Windows path
-forms (drive-letter, UNC) are normalized and unit-verified; bash components target
-POSIX/Git-Bash.
+### From conflict to continuation
 
-**Compatibility discipline:** versioned, additive-only schema migrations; a database
-created by v1 opens and works under v2.3 (pinned-fixture test); with no ranks, no cron
-manifest, and no profiles directory, v2.3 behavior is byte-for-byte v1. The master switch
-(v2.3) adds no schema and defaults to ON, so an existing board is unaffected until you
-flip it. The production board this was developed
-against was live-migrated in place with zero data loss.
+1. An actor requests its **complete resource set**. Claims are all-or-nothing;
+   priority and queue order determine eligibility.
+2. With verified native integration, a conflicting actor records a checkpoint,
+   yields, and **ends its turn**. It does not poll, continue modifying the
+   resource, or assume it owns a partial claim.
+3. Release or TTL reconciliation makes eligible waits available as durable wake
+   events. The script-only watchdog can reconcile expiry and interrupted
+   delivery; it does not launch an offline Hermes session.
+4. The plugin checks the exact target and current episode. The host admits a
+   continuation only at a safe idle boundary; user cancellation or a session
+   change fences stale work rather than redirecting it elsewhere.
+5. The resumed actor revalidates the **entire original claim** before using the
+   checkpoint. Another conflict means it yields again, not that permission is
+   assumed from an old notification.
 
-**Adversarial review:** before release, an independent agent was given the spec and told
-to break the implementation against a scratch board. It found two real ordering bugs
-(rank fencing dropped at the release boundary; children not notified on inherited
-re-rank). Both were fixed, repro scripts added, and the full matrix re-run green.
+Receiver receipts distinguish accepted delivery from a definitive non-send and
+an uncertain outcome. A lost acknowledgement is reconciled rather than blindly
+resent. **Admission is not task completion**: a delivered prompt does not prove
+the resumed work succeeded, and this is not a claim of exactly-once business
+effects.
 
-**Static analysis / security scans (results current as of release):**
+### Practical benefits and limits
 
-- `bandit` — 0 issues (the two dynamic-identifier SQL sites are hardcoded-table
-  migrations, annotated and audited; all value interpolation is parameterized).
-- `ruff` strict profile (`E,F,W,I,UP,SIM,ISC,RUF,B`) — 0 findings at line-length 100.
-- `shellcheck` — clean on the cron guard.
-- No network access, no subprocess/shell-out, no `eval`/`exec`, stdlib only.
-- Docstring coverage: 100% of functions.
+- **Less idle agent work:** a yielded parent consumes no further model turns
+  while waiting. Board/watchdog operations need no model calls; actual resumed
+  work still uses the configured model. No benchmarked cost saving is claimed.
+- **Recoverable interruptions:** durable claims, checkpoints, events, and
+  receipts make release/expiry recovery inspectable instead of relying only on
+  an in-memory notification.
+- **Reversible adoption:** keep standalone operation by default, add the plugin
+  on a later installer run, or remove only the plugin while retaining user state.
+- **Smaller host maintenance burden:** the external plugin owns the integration;
+  installation does not patch Hermes source or rewrite a running system prompt.
 
-**Change history:** every file carries an in-file `EDIT HISTORY` block (newest-first,
-dated, attributed), plus the repository `CHANGELOG.md`.
+This remains **cooperative coordination**, not an OS lock, sandbox, or forced
+process suspension. A non-participating actor can still modify a resource.
+Without the plugin, actors use manual coordination or bounded shell waits;
+automatic native continuation is unavailable. The native components remain
+unreleased until their compatibility and runtime acceptance gates are met.
 
-## 7. Compatibility and migration
+## Compatibility with upstream work
 
-- **Schema:** additive `ALTER TABLE` migrations only, applied idempotently on open. Old
-  boards upgrade in place; new columns default to inert values.
-- **Behavior:** features are opt-in by data. No ranks recorded → no fencing differences.
-  No cron manifest → no cron behavior. Downgrade-safe: v1 code ignores v2 columns.
-- **Interfaces:** rc 0/75 contract and all v1 output markers (`CLAIMED`, `HELD`,
-  `FREE:`, `RELEASED:`, …) are frozen; new information is appended, never reworded.
+The native interface is a proposal, not a replacement for existing plugin injection.
+[UPSTREAM-COMPATIBILITY.md](UPSTREAM-COMPATIBILITY.md) compares the pinned contracts
+with Hermes PRs #70406 (exact gateway IPC) and #53626 (runtime hooks). The update
+preserves existing injection behavior, adopts real public-registration/adapter tests,
+and does not depend on merging either proposal. Queue/steer acceptance is not the
+same guarantee as idle-only, receipt-backed continuation. Turn-halt and remote-file
+state improvements remain separate follow-ups.
 
-## 8. Install and quick start
-
-**Install as an official Hermes skill** (the repo follows the standard Hermes
-skill layout — `skills/multi-session-coordination/` with SKILL.md +
-`references/` + `templates/` + `scripts/` + `examples/`), any of:
+## Stable board quick start
 
 ```bash
-# direct GitHub install (no tap needed)
-hermes skills install P2ppyJack/session-coord/skills/multi-session-coordination
+git clone https://github.com/P2ppyJack/session-coord.git
+cd session-coord
+python3 install.py --check
+python3 install.py
+```
 
-# ...or add the repo as a tap and install from it
+The default installer:
+
+- copies the CLI, wake-state helper, cron guard, script-only reconciliation
+  watchdog, and selftests to `~/.hermes/scripts/`;
+- copies the skill bundle to `~/.hermes/skills/multi-session-coordination/`;
+- creates the state directory but never overwrites the board database or cron
+  manifest;
+- installs board-only managed enrollment in the default memory store and
+  existing profile carriers;
+- runs every bundled selftest against temporary databases unless `--no-verify`
+  is used.
+
+With the default **keep** choice, it does **not** import Hermes, install a
+plugin, edit Hermes configuration, schedule the watchdog, start a model, or
+restart a process. `--check` previews changes without prompting.
+
+Use the board:
+
+```bash
+SC="$HOME/.hermes/scripts/session_coord.py"
+python3 "$SC" status
+ID=$(python3 "$SC" register --task "update project" --surface cli | head -1)
+python3 "$SC" claim --id "$ID" --res "file:$HOME/project" --task "update project"
+# Continue only after CLAIMED. If HELD or QUEUED, do not mutate the resource.
+python3 "$SC" done --id "$ID"
+```
+
+A long-lived shell actor may add one bounded `--wait --timeout SECONDS` call.
+Board-only enrollment never tells an agent to use `--yield`, because a yielded
+agent needs a proven native consumer to resume it.
+
+## Installation and upgrades
+
+### Requirements
+
+- Python 3.8 or newer; the board uses only the standard library.
+- A POSIX shell for `coord_guard.sh` and the shell selftests. The Python CLI also
+  runs on Windows; the installer uses Git Bash when available and reports a
+  verification skip when no working Bash exists.
+
+### Optional-plugin choice and reruns
+
+On an interactive terminal, `python3 install.py` explains that the board works
+without a plugin, and offers:
+
+```text
+1. Do not install/change the plugin (keep the current setup; default)
+2. Install or upgrade the optional plugin
+3. Remove only the plugin; keep the board, claims, skills and other settings
+0. Cancel without changes
+```
+
+**Keep** means no plugin changes: it does not uninstall an existing plugin.
+Without the plugin, coordination is manual; automatic continuation into a
+running Hermes session requires the plugin and a compatible host. Installing
+native integration also enables waiting for every delegated agent's report;
+removing the plugin deliberately preserves that shared delegation setting.
+No choice restarts a running process or starts a stopped application.
+
+The choice is asked again on each interactive rerun. Choose **2** to add the
+plugin to an existing standalone installation, or update an installed plugin
+from a reviewed newer checkout. Choose **3** to remove only native integration.
+When installing, the prompt asks for the reviewed plugin checkout path if it
+was not supplied. Non-interactive runs default to **keep**, never to install or
+remove. Equivalent explicit commands are:
+
+```bash
+python3 install.py --plugin keep
+python3 install.py --plugin install --plugin-path /path/to/session-coord-native
+python3 install.py --plugin remove
+python3 install.py --plugin remove --check
+```
+
+Plugin changes target `default` unless `--profile NAME` is supplied; repeat
+that flag to select additional profiles. Plugin-only removal **bypasses the
+board install/update path**. It disables and removes just `session-coord-native`
+through Hermes, removes only its exact managed native instruction block, and
+leaves the standalone board, database, claims, skills, receipt state, shared
+watchdog, unrelated plugins, and other profiles intact. Pending waits are not
+cancelled or replayed: recover them manually if native continuation is removed.
+A repeated removal of an already-absent plugin is a no-op.
+
+Before removal, a recovery copy is verified under the selected profile's
+`state/session-coord-native-backups/`. Custom or malformed native instructions,
+redirected plugin paths, and ambiguous configuration are preserved and reported
+as `ACTION NEEDED`. Partial failures return nonzero and retain recovery evidence.
+Close/restart resident Hermes processes yourself to unload the plugin; on-disk
+removal does not revoke code already loaded into a running process.
+
+The plugin checkout's `install.py` delegates to this same installer; it no
+longer has a competing copy/force-overwrite implementation. If the checkouts are
+not siblings, pass `--board-installer /path/to/session-coord/install.py` to that
+entry point. Legacy `--force`, `--enable`, and `--json` flags on that old entry
+point are refused with instructions; use the canonical choices above, or
+`hermes_setup.py remove --profile default --json` for a structured removal report.
+
+### Installer options
+
+```text
+python3 install.py [--check] [--no-verify]
+  [--dest DIR] [--state-dir DIR]
+  [--memory-file FILE] [--profiles-dir DIR]
+  [--skill-dest DIR] [--seed-manifest]
+  [--no-wire-memory] [--no-wire-bots] [--no-wire-profiles]
+  [--no-skill] [--plugin keep|install|remove] [--plugin-path DIR]
+  [--profile NAME ...] [--hermes EXECUTABLE] [--hermes-arg TOKEN ...]
+```
+
+`HERMES_HOME`, `HERMES_SCRIPTS_DIR`, `HERMES_STATE_DIR`, and
+`HERMES_COORD_PROFILES_DIR` provide equivalent path defaults. Explicit flags win.
+Paths containing spaces and shell metacharacters are treated as literal paths.
+
+### Upgrade safety
+
+The installer distinguishes source code from user state:
+
+- differing installed scripts and skill files are backed up before replacement;
+- `session_coordination.db`, `cron_resources.json`, the disabled sentinel, and
+  unrelated files are preserved;
+- existing file permissions are preserved where a carrier is rewritten;
+- profiles outside the selected path are not inspected or changed;
+- opt-outs apply in both install and `--check` modes.
+
+Enrollment is versioned with exact managed blocks:
+
+```text
+<!-- BEGIN session-coord managed board-v2 -->
+...
+<!-- END session-coord managed board-v2 -->
+
+<!-- BEGIN session-coord managed bot-board-v2 -->
+...
+<!-- END session-coord managed bot-board-v2 -->
+```
+
+Exact text shipped as `session-coord (wire v1)` and
+`session-coord (bot-wire v1)` is migrated surgically, including the newer
+local-native variant. Surrounding memory, personality, and configuration stay
+byte-for-byte intact. Every changed existing carrier gets a `.bak-<timestamp>`
+copy. A customized, duplicated, or malformed legacy/managed block is preserved
+and reported as `ACTION NEEDED`; it is neither replaced nor counted current.
+Rerunning after a successful migration is byte-idempotent.
+
+Canonical manual copies are in:
+
+- `skills/multi-session-coordination/examples/memory-entry.example.md`
+- `skills/multi-session-coordination/templates/bot-soul-coordination.md`
+
+### Skill-only install
+
+The repository uses the standard third-party skill layout:
+
+```bash
+hermes skills install P2ppyJack/session-coord/skills/multi-session-coordination
+# or
 hermes skills tap add P2ppyJack/session-coord
 hermes skills install P2ppyJack/session-coord/multi-session-coordination
-
-# ...or straight from the raw SKILL.md URL
-hermes skills install https://raw.githubusercontent.com/P2ppyJack/session-coord/main/skills/multi-session-coordination/SKILL.md
 ```
 
-A hub install copies SKILL.md plus the referenced support files into
-`~/.hermes/skills/multi-session-coordination/` (the CLI then lives in that
-skill's `scripts/`). **It does not enroll your agent** — for full wiring
-(CLI in `~/.hermes/scripts/` + the standing memory rule), run `install.py`
-from a clone, or follow the manual path in §8.1.
+A skill-only install places the CLI under the installed skill's `scripts/`
+directory. It does not perform system-wide board enrollment; use `install.py` or
+copy the managed examples explicitly.
 
-**One-command install (recommended for full wiring).** Cross-platform, pure standard library,
-no network. It copies the CLI + guard + selftests into place, installs the
-skill bundle, creates the state
-directory, **never touches an existing board DB or cron manifest**, backs up any
-locally-modified script before replacing it, and then proves itself by running
-the full selftest matrix:
+## Optional Hermes native continuation — unreleased
+
+Native continuation requires two separately supplied, compatible components:
+
+1. a Hermes host with the generic native-turn-source registrar and the documented
+   joined-delegation policy helper;
+2. the external plugin named `session-coord-native`.
+
+These capabilities are not part of the stable board release, and this repository
+does not claim upstream acceptance or activation in an already running process.
+The helper proves the real registration API with Hermes Plugin Doctor; a stored
+config key or version string is not accepted as capability proof.
+
+The supplied plugin path must be a clean Git worktree with a committed HEAD.
+Hermes's sanctioned plugin installer clones a Git URL, so this restriction keeps
+the bytes checked by Doctor identical to the immutable bytes installed from the
+local `file://` URL.
+
+### Read-only check
+
+Select profiles explicitly; repeat `--profile` or use `--all-profiles`:
 
 ```bash
-python3 install.py                 # install or upgrade into ~/.hermes
-python3 install.py --check         # dry run: show what WOULD change, touch nothing
-python3 install.py --dest /opt/coord/bin --state-dir /var/lib/coord   # custom paths
-python3 install.py --seed-manifest # also drop an example cron manifest if none exists
-python3 install.py --no-wire-memory          # scripts only — skip the memory entry
-python3 install.py --memory-file ~/.hermes/memories/MEMORY.md   # explicit store target
-python3 install.py --no-wire-bots            # skip the bot SOUL.md blurb step
-python3 install.py --no-wire-profiles        # skip wiring non-bot profiles' own memory
-python3 install.py --profiles-dir ~/.hermes/profiles   # explicit profiles dir
+python3 hermes_setup.py check \
+  --profile default \
+  --plugin-path /absolute/path/to/session-coord-native
+
+python3 hermes_setup.py check \
+  --all-profiles \
+  --plugin-path /absolute/path/to/session-coord-native \
+  --json
 ```
 
-Re-running is safe: an existing install is upgraded in place (unchanged files
-are reported `unchanged`; a changed file is backed up to `<name>.bak-<ts>`
-first). The installer never flips the master switch and never deletes anything.
+`check` performs no installation, configuration, enrollment write, scheduling,
+or restart. For every selected profile it verifies:
 
-### 8.1 Wire it into the agent — the step that makes it a protocol
+- the profile resolves through `hermes -p PROFILE config path`;
+- `hermes -p PROFILE plugins doctor /ABS/PLUGIN --ci` exercises real plugin
+  registration;
+- the installed plugin, enablement state, exact Boolean
+  `delegation.wait_for_all`, and plugin-owned `native-check --json` agree;
+- board and native managed enrollment are current.
 
-The board is *advisory* (Rule 1): it never wraps syscalls, so **a session
-that never checks it gets no protection at all**. Installing the scripts
-does not enroll sessions — an agent checks the board only when its standing
-instructions tell it to. That carrier is the **memory entry**: agent memory
-is injected into every session, every turn, so a rule living there fires on
-*every* task instead of only when a skill happens to load.
+A failure in any profile makes the global result not ready.
 
-`install.py` writes that entry automatically: it appends the canonical rule
-to the agent memory store (`~/.hermes/memories/MEMORY.md` — append-only,
-backed up first, and idempotent: a `session-coord (wire v1)` marker makes
-re-runs no-ops, and the store's own `§` delimiter keeps it a genuine
-standalone entry). Fail-open: if there is no memory store (not a Hermes
-machine), it prints the entry and installs everything else anyway. To see
-the entry before it lands, `--check` previews the wiring step.
-
-**If you installed manually, or want to wire a different agent, add this
-verbatim** (one line) to your agent's memory — ask your agent to "add this
-to your memory", or append it to `~/.hermes/memories/MEMORY.md`:
-
-```
-STANDING RULE — session-coord (wire v1): ALWAYS deconflict via the coordination board before touching shared resources (files, skills, memory, cron store, remote boxes, desktop UI) — any concurrent session/bot/cron may be mid-task. First: `python3 ~/.hermes/scripts/session_coord.py status`. Then register once (`ID=$(python3 ~/.hermes/scripts/session_coord.py register --task '...')`); claim before writes (`python3 ~/.hermes/scripts/session_coord.py claim --id $ID --res <keys> --wait`); `python3 ~/.hermes/scripts/session_coord.py done --id $ID` at task end. Full protocol: skill multi-session-coordination. Off-switch: `python3 ~/.hermes/scripts/session_coord.py disable`.
-```
-
-Note: the `hermes memory` CLI configures the external memory *provider* — it
-does **not** add entries. The supported paths are asking the agent (it has a
-memory tool), editing the file, or letting `install.py` do it. Every active
-agent profile on the machine needs a copy.
-
-### 8.2 Bots and profiles — wired automatically, audited by `status`
-
-**Bots** can't be enrolled through memory (their handoff runs load only the
-persona file), so `install.py` appends the coordination blurb
-(`templates/bot-soul-coordination.md`, `<botname>` substituted, marker
-`session-coord (bot-wire v1)`) to every existing `profiles/*/SOUL.md` —
-idempotent, backed up, `--no-wire-bots` to skip, `--profiles-dir` to point
-elsewhere. Profiles without a SOUL.md are never given one.
-
-**Non-bot profiles** are full agent instances with their OWN memory stores —
-the main store's rule never reaches their sessions. The installer appends the
-standing rule to each SOUL-less profile's
-`<profiles>/<name>/memories/MEMORY.md` (created if absent;
-`--no-wire-profiles` to skip). Bot profiles are skipped here: the blurb is
-their carrier, and double-wiring would cost tokens every turn.
-
-Actors created **after** the install still need wiring (re-run `install.py`,
-or paste the blurb / memory entry) — and the board tells you when one is
-missing: `session_coord.py status` lists persona-bearing profiles lacking the
-blurb marker under `— UNENROLLED bot profiles` (`unenrolled_bot_profiles` in
-`--json`), and SOUL-less profiles whose existing memory store lacks the
-standing rule under `— UNWIRED profiles` (`unwired_profiles`). Store-less
-fresh profiles are never flagged — an existing store proves agent sessions
-run there; absence of one is no evidence. An unenrolled actor is invisible to
-coordination; the audits make that visible before it costs you a clobber.
-
-**If you are an agent performing this install:** run `install.py`, then add
-the entry above to your own memory store verbatim (adjusting the script path
-if `--dest` was used) — or verify it is already there if the installer
-reported `wired`. Then run `python3 ~/.hermes/scripts/session_coord.py
-status` once to create the board and prove the CLI works. From then on:
-check the board before touching shared resources, register once per task,
-claim before writing, `done` at the end.
-
-**Manual install** (if you prefer to place files yourself):
+### Explicit setup
 
 ```bash
-# 1. Drop the CLI + guard somewhere on PATH (stdlib only, Python ≥3.8)
-cp skills/multi-session-coordination/scripts/session_coord.py \
-   skills/multi-session-coordination/scripts/coord_guard.sh ~/.hermes/scripts/
-
-# 2. A session's lifecycle
-SID=$(python3 session_coord.py register --task "refactor helper lib" --surface desktop)
-#    (or pre-mint a memorable id: register --id my-task-2026 … / export HERMES_COORD_ID=my-task-2026)
-python3 session_coord.py claim  --id "$SID" --res file:~/project/lib --res skill:my-skill
-#   ... work ...
-python3 session_coord.py done   --id "$SID"       # release everything, notify waiters
-
-# 3. Wire the cron guard into a wrapper (optional, fail-open) — see skills/multi-session-coordination/examples/wrapper.example.sh
-source ~/.hermes/scripts/coord_guard.sh           # exits 75 if it should defer
-
-# 4. Tell the board what your crons touch (optional)
-cp skills/multi-session-coordination/examples/cron_resources.example.json ~/.hermes/state/cron_resources.json
-
-# 5. Verify everything on your machine
-cd skills/multi-session-coordination/scripts
-bash selftest.sh && bash selftest_priority.sh && \
-  bash selftest_cron.sh && bash selftest_toggle.sh
+python3 hermes_setup.py setup \
+  --profile default \
+  --profile research \
+  --plugin-path /absolute/path/to/session-coord-native
 ```
 
-**Turning it off.** Coordination is overhead when you run solo. Disable the
-whole layer without uninstalling — every verb and every cron guard becomes a
-fail-open no-op (see §3.17):
+Before the first mutation, the helper resolves and Doctor-checks every selected
+profile and refuses globally on an unsupported host, unavailable profile,
+unverifiable plugin checkout, stale board enrollment, or customized native block.
+It then uses only sanctioned Hermes operations:
+
+1. install or upgrade the immutable plugin revision;
+2. Doctor the installed copy;
+3. enable `session-coord-native` without built-in tool override;
+4. call `session-coord native-check --json` and require real native-source and
+   joined-policy support;
+5. set `delegation.wait_for_all` to `true` through `hermes config set` only when
+   needed;
+6. require an exact JSON Boolean `true` from `hermes config get ... --json` and
+   repeat `native-check`;
+7. after every selected profile succeeds, write the separate managed native
+   enrollment block.
+
+Malformed JSON, wrong JSON types such as `"true"` or `1`, a command timeout, or
+partial persistence stops further mutation. The report distinguishes
+`configured_not_enrolled`, `partial`, and `action_needed` states; it never treats
+a partially configured set as ready. A healthy rerun performs checks only and
+creates no extra enrollment backup.
+
+The plugin reports activation as `fresh_process_only`. Successful setup therefore
+ends as **configured; restart required**. The helper never restarts CLI, TUI,
+Desktop, or gateway processes and never changes model/provider settings.
+
+Native setup intentionally uses the canonical board installed at the default
+profile's `scripts/session_coord.py`. A custom `install.py --dest` remains valid
+for board-only use but is not accepted for native setup because the external
+consumer path is not part of the current `native-check` receipt. Use
+`--hermes /path/to/hermes` to supply one executable path as a single argv token.
+Repeat `--hermes-arg TOKEN` only for launcher forms such as
+`python hermes_stub.py`; every value remains a separate argv token. No shell
+command strings are accepted or evaluated.
+
+### Optional shared watchdog
+
+The default installer only copies `coord_resume_watchdog.py`. Scheduling is a
+separate explicit choice:
 
 ```bash
-python3 session_coord.py disable    # or: enable / switch / switch toggle
-HERMES_COORD_DISABLED=1 ./one-shot-wrapper.sh   # off for just this run
+python3 hermes_setup.py setup \
+  --profile default \
+  --plugin-path /absolute/path/to/session-coord-native \
+  --watchdog
 ```
 
-**Enrollment for bots and subagents.** Concurrent named agents and fan-out
-children inherit no environment, so they learn the protocol from their prompt.
-Ready-to-paste texts ship in `skills/multi-session-coordination/examples/bot-soul-coordination.example.md`
-(bot persona blurb) and `skills/multi-session-coordination/examples/subagent-prompt.example.md` (fan-out child
-prompt); the main-session enrollment — the standing memory entry of §8.1 —
-ships in `skills/multi-session-coordination/examples/memory-entry.example.md`.
+`--watchdog` requires `default` to be selected. The helper invokes the plugin's
+sanctioned command only through the canonical owner profile:
 
-## 9. Command tour
+```text
+hermes -p default session-coord watchdog-setup --json
+hermes -p default session-coord watchdog-setup --json --check
+```
+
+There is one machine-wide job, not one per profile. Check mode is read-only. The
+plugin owns duplicate/drift detection and scheduler readback. An uncertain create
+is never retried; the helper performs a read-only reconciliation and reports the
+observed partial state and recovery command. The watchdog is script-only: it runs
+`wake-reconcile --json` without a model or network call.
+
+See `skills/multi-session-coordination/references/automatic-resume.md` for the
+receipt, cancellation, target, and recovery invariants.
+
+### Setup and upgrade recovery
+
+- **`ACTION NEEDED` for an enrollment:** keep the carrier unchanged, compare the
+  managed span with the canonical example, and reconcile user-owned edits before
+  rerunning. Backups are adjacent `.bak-<timestamp>` copies.
+- **Source checkout not clean:** Doctor still examines the supplied bytes in
+  check mode, but setup refuses to install a different committed snapshot. Make
+  a clean committed copy and rerun; the supplied repository is never changed.
+- **Installed plugin has local edits:** the installed checkout is preserved. Move
+  or reconcile those changes before asking setup to replace it.
+- **Plugin installed/enabled but policy failed:** no native enrollment is written.
+  Correct the reported config/capability fault and rerun `check`, then `setup`.
+- **Configuration persisted but another selected profile failed:** the report
+  marks the completed profile `configured_not_enrolled`. Fix the failing profile
+  and rerun the same complete profile set; do not paste native instructions.
+- **Watchdog create uncertain:** run `check --watchdog`. Never create another job
+  until the plugin's read-only check resolves the scheduler state.
+- **Setup succeeded:** start a fresh Hermes process. The helper never restarts a
+  resident process and never reports live activation for it.
+
+## Coordination model
+
+### Resource keys
+
+| Key | Scope |
+|---|---|
+| `file:/absolute/path` | A file or a directory and its descendants |
+| `skill:<name>` | One skill while it is being edited |
+| `memory` | The machine's main agent memory store |
+| `ui:desktop` | Exclusive foreground desktop control |
+| `box:<host>` | Mutating work on a remote machine |
+| `cron-store` | Scheduled-job registry mutation |
+| `res:<name>` | An agreed custom resource |
+
+Claims are atomic across repeated `--res` arguments. If any requested resource
+is unavailable, none of the set is granted. Directory claims overlap descendant
+paths after canonicalization.
+
+### Priority and fairness
+
+Only the user assigns priority through `prioritize`. Agents must not self-rank.
+Among equal ranks, the earliest live waiter wins. A free resource can remain
+fenced for the better-ranked or earlier waiter. Abandoned ordinary waiters stop
+fencing after their liveness window; paused resume spots remain explicit.
+
+`preempt` requests cooperation. A holder finishes its current atomic write,
+checkpoints, pauses, and releases. `steal` is a loud, audited break-glass command
+and requires explicit user approval.
+
+### TTL and failure behavior
+
+Claims expire after their TTL and stale rows are reaped. Expiry is not proof that
+the real resource is safe: inspect it before the first mutation after an expired
+holder. Size `--ttl` to long work and refresh the same idempotent claim after long
+interruptions.
+
+The board fails open at the CLI boundary so its own outage cannot strand an
+unrelated backup. Agents should still report that they are operating without
+coordination and avoid shared mutations until the board is healthy.
+
+### Bots and profiles
+
+A profile with `SOUL.md` is treated as a bot enrollment carrier. A non-bot
+profile uses its own `memories/MEMORY.md`. `status` reports persona-bearing
+profiles whose exact bot managed block is absent as `UNENROLLED`, and non-bot
+profiles with an existing but non-current memory carrier as `UNWIRED`. A marker
+substring alone does not clear either audit.
+
+Bots' own profile-internal memory, sessions, and cron store are claim-free. Files
+they create in shared locations are still shared and require claims.
+
+### Cron jobs
+
+`cron_resources.json` maps job ids to resources, a `wait` or `skip` policy, and a
+critical flag. A wrapper sources `coord_guard.sh` before any work:
+
+```bash
+. "$HOME/.hermes/scripts/coord_guard.sh"
+coord_guard <job-id> wait 900 90 || { [ $? -eq 75 ] && exit 0; }
+```
+
+The guard is shell-only and runs before an agent/model. Manifest drift is a
+safety defect: update a job's complete resource list whenever its footprint
+changes. A critical job must not be silently deferred; finish and release, run it
+early, or record an explicit pause/resume responsibility.
+
+## Command reference
 
 | Command | Purpose |
 |---|---|
-| `register` | Join the board (`--rank`, `--parent/--slot` for subagents) |
-| `claim` / `check` / `release` / `done` | The core loop; `claim --wait` queues politely |
-| `status` | Whole-office view: holders, waiters, ranks, 12 h cron radar |
-| `inbox` | Read and clear your notifications |
-| `prioritize` | **User-only**: set/clear ranks, bulk `--order "a=1,b=2"` |
-| `preempt` | Ask a lower-ranked holder to checkpoint and yield |
-| `pause` / `resume` | Checkpoint-safe yielding with a reserved resume spot |
-| `steal` | Break-glass force release (loud, audited) |
-| `cron-guard` | The guard's board query (used by `coord_guard.sh`) |
-| `wait-for-cron` | Block until a scheduled job has actually fired |
-| `cron-note` | Book responsibility for pausing/resuming a cron |
-| `switch` / `enable` / `disable` | **Master switch**: report, or turn the whole board off/on (fail-open no-op while off) |
+| `status [--json]` | Sessions, claims, queues, cron radar, enrollment audit |
+| `register --task T [--surface S] [--parent P --slot a]` | Join the board |
+| `claim --id ID --res K [--res K...] [--wait]` | Atomically request resources |
+| `check --res K` / `wait --res K` | Inspect or block for availability |
+| `release --id ID [--res K]` / `done --id ID` | Release one/all and notify |
+| `inbox --id ID` | Read release, expiry, and preemption notices |
+| `prioritize --session ID --rank N` | Record user-set priority |
+| `preempt --id ID --res K` | Ask a lower-priority holder to pause |
+| `pause --id ID --note TEXT` / `resume --id ID` | Manual cooperative pause/resume |
+| `steal --id ID --res K --reason TEXT` | Explicit break-glass release |
+| `cron-guard`, `cron-note`, `wait-for-cron` | Scheduled-job coordination |
+| `switch`, `enable`, `disable` | Report or change the board master switch |
 
----
+Legacy command and JSON contracts remain available. Native-only flags and
+commands remain documented in the advanced reference but must not be used as an
+automatic-resume promise without successful optional setup.
 
-**License:** MIT © 2026 [Tobias Musser](https://github.com/P2ppyJack)
+## Verification
 
-*Built and battle-tested inside a live multi-session Hermes Agent setup — the board this
-code was developed against was coordinating the very sessions that wrote it.*
+All suites use temporary databases and stores:
+
+```bash
+bash skills/multi-session-coordination/scripts/selftest.sh
+bash skills/multi-session-coordination/scripts/selftest_priority.sh
+bash skills/multi-session-coordination/scripts/selftest_cron.sh
+bash skills/multi-session-coordination/scripts/selftest_toggle.sh
+python3 skills/multi-session-coordination/scripts/selftest_wakes.py
+python3 -m pytest -q tests
+```
+
+The CI workflow defines board and portable installer/helper tests for Linux,
+macOS, and Windows across supported Python versions; a workflow definition is
+not evidence that an unpublished revision passed on those platforms.
+External Hermes/plugin integration may
+skip when those separately supplied components are absent; a skip is not proof
+of native activation.
+
+After installation, verify the managed block and a scratch claim:
+
+```bash
+python3 "$HOME/.hermes/scripts/session_coord.py" status
+ID=$(python3 "$HOME/.hermes/scripts/session_coord.py" register --task verify)
+python3 "$HOME/.hermes/scripts/session_coord.py" claim --id "$ID" --res res:verify
+python3 "$HOME/.hermes/scripts/session_coord.py" done --id "$ID"
+```
+
+## License and attribution
+
+MIT licensed. Copyright © 2026 Tobias Musser. The project is maintained by
+Tobias Musser (P2ppyJack), with implementation assistance from Hermes Agent.
+
+Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser
+
+Hermes analyzed and drafted; Tobias Musser supplied business context, adjudicated
+judgment calls, and corrected conclusions.

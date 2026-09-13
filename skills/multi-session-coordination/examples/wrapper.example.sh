@@ -12,15 +12,19 @@
 set -euo pipefail
 
 # --- step 0: coordination guard -------------------------------------------
-# COORD_SC defaults to ~/.hermes/scripts/session_coord.py; override if you
-# installed the CLI elsewhere.
-# shellcheck source=scripts/coord_guard.sh disable=SC1091
-source "$(dirname "${BASH_SOURCE[0]}")/../scripts/coord_guard.sh"
+# A full install puts both files in ~/.hermes/scripts. Override the directory
+# when install.py used a custom --dest.
+COORD_SCRIPTS_DIR=${COORD_SCRIPTS_DIR:-"$HOME/.hermes/scripts"}
+# shellcheck source=/dev/null
+source "$COORD_SCRIPTS_DIR/coord_guard.sh"
 
 # args: <job-id-in-your-manifest> <policy skip|wait> <wait-timeout-s> <claim-ttl-min>
-coord_guard "nightly-backup-example" wait 900 90
-case $? in
-  75) exit 0 ;;   # a session holds our resources: skip this tick silently
+guard_rc=0
+coord_guard "nightly-backup-example" wait 900 90 || guard_rc=$?
+case "$guard_rc" in
+  0) ;;            # claimed, or the guard deliberately failed open
+  75) exit 0 ;;    # another actor holds the resource: skip this tick silently
+  *) exit "$guard_rc" ;;  # wrapper/configuration error, not a board outage
 esac
 # rc 0: either claimed (COORD_GUARD_ID set, EXIT trap releases) or fail-open.
 
