@@ -21,8 +21,6 @@ jobs:
           - os: macos-latest
             python: "3.8"
     runs-on: ${{ matrix.os }}
-    env:
-      HERMES_HOME: ${{ runner.temp }}/coord/home
     defaults:
       run:
         shell: bash   # Git Bash on Windows
@@ -31,6 +29,8 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ matrix.python }}
+      - name: isolate test home in runner temporary storage
+        run: printf 'HERMES_HOME=%s/coord/home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: skill bundle layout + frontmatter (Hermes skill contract)
         run: |
           python3 - <<'EOF'
