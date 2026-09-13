@@ -121,6 +121,19 @@ class WakeCLITest(unittest.TestCase):
             "durable": True,
         }
 
+    def disposition_receipt(self, event, outcome):
+        receipt = {
+            "event_id": event["event_id"],
+            "native_session_id": event["native_session_id"],
+            "profile_home": event["profile_home"],
+            "status": outcome,
+            "payload_hash": "selftest-durable-readback",
+            "payload_sha256": "selftest-durable-readback",
+        }
+        if outcome == "not_sent":
+            receipt.update(not_sent=True, submitted=False)
+        return receipt
+
     def yield_claim(self, sid, resources, checkpoint=None, rc=75):
         checkpoint = checkpoint or self.checkpoint(f"{sid}.json")
         args = ["claim", "--id", sid]
@@ -414,7 +427,8 @@ class WakeCLITest(unittest.TestCase):
         attempt1 = self.lease("wait2")
         not_sent = self.run_cli(
             "wake-result", "--event", attempt1["event_id"], "--attempt", "1",
-            "--outcome", "not_sent", "--receipt-json", "{}"
+            "--outcome", "not_sent", "--receipt-json",
+            json.dumps(self.disposition_receipt(attempt1, "not_sent"), sort_keys=True)
         )
         self.assertEqual(not_sent["status"], "pending")
         attempt2 = self.lease("wait2", worker="worker-2")
@@ -447,7 +461,8 @@ class WakeCLITest(unittest.TestCase):
 
         # Put was-first back at the head, admit it, then move now-first ahead.
         self.run_cli("wake-result", "--event", new_head["event_id"], "--attempt", "1",
-                     "--outcome", "not_sent", "--receipt-json", "{}")
+                     "--outcome", "not_sent", "--receipt-json",
+                     json.dumps(self.disposition_receipt(new_head, "not_sent"), sort_keys=True))
         self.run_cli("prioritize", "--session", "was-first", "--rank", "0")
         admitted = self.lease("was-first")
         self.deliver(admitted)
@@ -623,7 +638,8 @@ class WakeCLITest(unittest.TestCase):
         event = self.lease("waiter")
         canceled = self.run_cli(
             "wake-result", "--event", event["event_id"], "--attempt", "1",
-            "--outcome", "canceled", "--receipt-json", "{}"
+            "--outcome", "canceled", "--receipt-json",
+            json.dumps(self.disposition_receipt(event, "canceled"), sort_keys=True)
         )
         self.assertEqual(canceled["status"], "canceled")
         self.run_cli("wake-reconcile")

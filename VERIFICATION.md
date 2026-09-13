@@ -34,6 +34,22 @@ host candidate (`6b7a3ef05121c8b27598898c0b181b6a209b8889`):
 - Expanded delegation/schema checks on Linux: **126 passed, 0 failed**; the macOS
   baseline exception above is retained explicitly.
 
+## Receipt-validation repair gate
+
+The board now requires an exact durable disposition receipt before `not_sent` or
+`canceled` may mutate leased or unknown wake state. Incorrect receipts leave the
+database unchanged. The repair passed an independent code re-review.
+
+- Current repaired components: **166 passed, 0 skipped on macOS**, and **166 passed,
+  0 skipped on Linux** (23 test files, including 36 new receipt regressions).
+- Existing wake CLI selftests: **18 passed on Linux/Python 3.8**.
+- The plugin bundle's two stale shell selftests were synchronized to the canonical
+  copies and passed pinned ShellCheck.
+- **Windows repair acceptance is pending. Do not publish this candidate as verified
+  on Windows until the versioned v5 result is accepted.** The v5 scope repeats the
+  entire standalone pytest suite and the wake CLI selftests on all three existing
+  Windows interpreters; it is not a repeat of the earlier full 33-step workflow.
+
 ## Previously executed platform acceptance
 
 These scopes are retained separately; they are not added together.
@@ -50,9 +66,9 @@ These scopes are retained separately; they are not added together.
 
 The Windows payload was bound to SHA-256
 `9f843730fdba04bf02df790634ae759ad144f76412ce40b2c5598ece60ddcdfb`.
-Its executable, test and workflow files are preserved; publication documentation
-is refreshed separately. The archive hash is historical evidence, not the hash
-of a newly assembled GitHub source archive.
+That result predates the receipt-validation repair. The receipt engine, its wake
+selftest fixtures and a new regression file require the v5 Windows rerun. This old
+archive hash is historical evidence, not the current candidate's identity.
 
 Windows skips: one optional-plugin lifecycle test lacked a real host/plugin
 configuration; one prompt test requires a POSIX pseudo-terminal; four folder-with-

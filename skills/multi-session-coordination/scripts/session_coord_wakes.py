@@ -782,6 +782,24 @@ def record_result(conn, event_id, attempt, outcome, receipt_json, now_fn=clock):
         return None, f"wake attempt already has final outcome '{previous}'", True
 
     exact = _receipt_exact(payload, receipt)
+    if outcome in ("not_sent", "canceled"):
+        durable = bool(receipt.get("payload_hash")) and (
+            receipt.get("payload_hash") == receipt.get("payload_sha256")
+        )
+        disposition = receipt.get("status") == outcome
+        if outcome == "not_sent":
+            disposition = disposition and receipt.get("not_sent") is True \
+                and receipt.get("submitted") is False
+        else:
+            disposition = disposition and not any(
+                receipt.get(field) is True
+                for field in ("admitted", "accepted", "duplicate", "not_sent")
+            ) and receipt.get("submitted") is not False
+        if not (exact and durable and disposition):
+            return None, (
+                f"{outcome} requires an exact event/profile/native-session durable "
+                f"{outcome.replace('_', '-')} receipt"
+            ), False
     if outcome == "delivered":
         admitted = bool(
             receipt.get("admitted")
@@ -796,14 +814,6 @@ def record_result(conn, event_id, attempt, outcome, receipt_json, now_fn=clock):
         if not (exact and admitted and durable):
             return None, (
                 "delivered requires an exact event/profile/native-session durable admission receipt"
-            ), False
-    if previous == "unknown" and outcome == "not_sent":
-        authoritative = exact and (
-            receipt.get("not_sent") is True or receipt.get("submitted") is False
-        )
-        if not authoritative:
-            return None, (
-                "unknown attempts may retry only after an authoritative exact not-sent receipt"
             ), False
     if previous == "unknown" and outcome == "unknown":
         return {
