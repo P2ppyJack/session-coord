@@ -45,10 +45,17 @@ database unchanged. The repair passed an independent code re-review.
 - Existing wake CLI selftests: **18 passed on Linux/Python 3.8**.
 - The plugin bundle's two stale shell selftests were synchronized to the canonical
   copies and passed pinned ShellCheck.
-- **Windows repair acceptance is pending. Do not publish this candidate as verified
-  on Windows until the versioned v5 result is accepted.** The v5 scope repeats the
-  entire standalone pytest suite and the wake CLI selftests on all three existing
-  Windows interpreters; it is not a repeat of the earlier full 33-step workflow.
+- **Native Windows receipt-repair acceptance passed:** all six expected
+  interpreter/step pairs completed, using Python 3.8.10, 3.11.9 and 3.13.15.
+  Each interpreter passed **107 pytest cases with 6 documented skips**, plus
+  **18 wake CLI selftests**. Startup, noninteractive input, artifact hashes and
+  success/failure exit controls were verified. The report identifies Windows
+  build 26200 and AMD64 interpreter processes; it is not native ARM64 certification.
+- This rerun covers the entire standalone pytest suite and wake CLI selftests,
+  not a repeat of the earlier full 33-step workflow. The tested board source is
+  `1d2396f1b1378592cb9a3d16488e902e7ba403d6`; later publication edits are documentation-only.
+  Verified payload SHA-256:
+  `bce60ace50d3819b1247ab47d17bb70f53c832b42c7ef0da2247c3e040b45f86`.
 
 ## Previously executed platform acceptance
 
@@ -67,8 +74,8 @@ These scopes are retained separately; they are not added together.
 The Windows payload was bound to SHA-256
 `9f843730fdba04bf02df790634ae759ad144f76412ce40b2c5598ece60ddcdfb`.
 That result predates the receipt-validation repair. The receipt engine, its wake
-selftest fixtures and a new regression file require the v5 Windows rerun. This old
-archive hash is historical evidence, not the current candidate's identity.
+selftest fixtures and new regression file are covered by the accepted receipt-repair
+rerun above. This old archive hash is historical evidence, not the current candidate's identity.
 
 Windows skips: one optional-plugin lifecycle test lacked a real host/plugin
 configuration; one prompt test requires a POSIX pseudo-terminal; four folder-with-

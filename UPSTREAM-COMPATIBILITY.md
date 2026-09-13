@@ -10,11 +10,11 @@ unreleased gateway IPC or runtime-hook proposals as a dependency of this update.
 Their applicable contracts and review lessons are incorporated into verification;
 no code or commits from those proposals are represented as original work here.
 
-The host candidate is pinned to Hermes base
-`0b8daf30aae1d0b129ede9b857cac2158eb50324`. Upstream was also fetched at
-`ad03f20dd61919ca2135d6904e787a94284aacaf`: the intervening changes affect six
-Desktop files, not the Python host paths in these patches. This is a dated
-compatibility observation, not permission to apply patches to arbitrary versions.
+The publication host candidate is based on Hermes
+`5dea46d13deec9549bdc2ea703ae9201d733c28d`. Earlier local acceptance used
+`0b8daf30aae1d0b129ede9b857cac2158eb50324`; the forward-port preserves newer
+upstream behavior and has its own focused verification. These pinned-base results
+are not permission to apply patches to arbitrary Hermes versions.
 
 ## Contract comparison
 
@@ -43,7 +43,7 @@ machinery. Existing plugin-injection and relay-routing regressions are run uncha
 A new public-path integration test loads the real external plugin through normal
 host discovery and uses the real `BasePlatformAdapter` path for gateway admission.
 
-Before upstream publication, request maintainer agreement on whether the common
+Before merge, request maintainer agreement on whether the common
 idle reservation/scheduling layer should be factored further. An IPC implementation
 could become a transport adapter only if it supports idle-only refusal, synchronous
 pre-model admission, exact receipt readback, and cancellation fencing without
