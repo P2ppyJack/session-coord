@@ -5,6 +5,64 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Interactive installer choice explains standalone operation, optional plugin
+  installation/upgrade, plugin-only removal, and cancellation. Non-interactive
+  runs keep the current plugin state unless an action is explicit. Rerunning
+  supports adding, updating, removing and re-adding native integration.
+- Plugin-only removal preserves the board and user state, verifies a recovery
+  copy, and uses public Hermes disable/remove commands with exact readback.
+- Real isolated-Hermes lifecycle tests cover interactive add/remove, pinned
+  upgrades, repeat runs, state preservation, and failure-path refusals.
+- Repository-root `hermes_setup.py` provides one explicit interface for
+  read-only native-integration checks and opt-in setup. Profiles are selected
+  with repeated `--profile` or explicit `--all-profiles`; the external
+  `session-coord-native` source is supplied with `--plugin-path`.
+- Native setup proves the real Hermes registration boundary with Plugin Doctor,
+  installs/enables through sanctioned plugin commands, requires exact Boolean
+  readback of `delegation.wait_for_all`, and verifies the plugin-owned
+  `native-check --json` result. Successful on-disk setup is reported separately
+  from `fresh_process_only` restart requirements.
+- Optional `--watchdog` delegates to the plugin-owned, default-profile
+  `watchdog-setup --json` command. It manages one shared machine-wide job; check
+  mode is read-only and uncertain creation is never retried blindly.
+- Portable subprocess tests cover fresh/setup/check/rerun flows, all-profile
+  preflight, unsupported hosts, malformed JSON, non-Boolean readback, partial
+  persistence, literal spaced/metacharacter paths, and protected-file hashes.
+
+### Changed
+
+- Installer enrollment now uses versioned `board-v2` and `bot-board-v2` managed
+  blocks. Exact text shipped as wire-v1/bot-wire-v1—including the newer
+  local-native variant—is migrated surgically with backup and preserved
+  surrounding content. Customized, duplicated, or malformed blocks remain
+  untouched and return `ACTION NEEDED` instead of being marker-skipped.
+- Default enrollment is board-only and no longer promises native automatic
+  resume or tells a session to `--yield` without a proven consumer. Native
+  instructions live in a separate opt-in managed block written only after all
+  selected profiles pass setup.
+- Enrollment audits require exact current managed blocks rather than accepting a
+  legacy marker substring. Enrollment writes use compare-and-swap checks, retain
+  file modes, and preserve any carrier changed after preflight.
+- Generated shell snippets quote custom paths as single argv values, including
+  paths containing spaces, command substitutions, or other shell metacharacters.
+- Hosts without a working Bash report partial verification instead of claiming
+  that every suite passed.
+- Native setup validates the plugin manifest identity, clean source revision, and
+  installed revision before configuration.
+- Documentation now distinguishes the stable framework-neutral board from the
+  optional unreleased Hermes host/plugin API. Standard third-party skill
+  packaging replaces unverified “official” wording.
+
+### Compatibility
+
+- Existing board CLI, SQLite schema/data, cron manifest, script-only guard,
+  opt-outs, custom paths, and legacy command/JSON contracts remain available.
+- Native integration remains unreleased until a compatible Hermes host and the
+  separate external plugin are supplied and pass real integrated checks; no
+  upstream acceptance or resident-process activation is claimed.
+
 ## [2.4.0] — 2026-08-31
 
 ### Added — bot enrollment: automatic wiring + board audit
@@ -87,15 +145,15 @@ installer now wires that enrollment itself.
 - `examples/memory-entry.example.md`: the canonical "always call it" entry
   with the three delivery paths (ask the agent / edit the file / installer)
   and an instruction block for an agent performing the install itself.
-- README §8.1 "Wire it into the agent" and a threat-model row for
+- README "Agent enrollment" guidance and a threat-model row for
   non-participating sessions (the failure this closes).
 - CI: installer smoke test now re-runs the installer against a scratch
   memory store and asserts exactly one wire marker survives.
 
-### Added — official Hermes skill packaging
+### Added — standard Hermes skill packaging
 
 The repo now follows the standard Hermes skill layout, so the project is
-installable as an **official skill** through the Skills Hub:
+installable through the standard third-party skill path:
 
 - **New layout**: everything the skill needs moved under
   `skills/multi-session-coordination/` — `SKILL.md` (canonical, house-standard
@@ -105,7 +163,7 @@ installable as an **official skill** through the Skills Hub:
   `templates/` (bot SOUL.md blurb, machine-generic), `scripts/` (the engine:
   CLI + guard + 4 selftest suites), and `examples/` (enrollment texts, cron
   manifest, wrapper).
-- **Install paths** (README §8): `hermes skills install
+- **Install paths** (README "Installation"): `hermes skills install
   P2ppyJack/session-coord/skills/multi-session-coordination`, tap install, or
   direct-URL install of the raw SKILL.md. A hub install copies SKILL.md +
   referenced support files into `~/.hermes/skills/` (the CLI then lives in the
@@ -115,7 +173,7 @@ installable as an **official skill** through the Skills Hub:
   `--skill-dest` / `--no-skill`) with the same idempotent
   backup-on-change policy as the payload — one command now delivers scripts +
   skill + standing memory rule.
-- **CI**: new "skill bundle layout + frontmatter" gate (checks the official
+- **CI**: new "skill bundle layout + frontmatter" gate (checks the Hermes
   skill contract: file placement, required frontmatter fields, ≤60-char
   description, referenced files exist in-bundle, no machine-local paths) plus
   an installer idempotency check that the skill bundle lands and a re-run
@@ -127,32 +185,6 @@ installable as an **official skill** through the Skills Hub:
   contract, and all 127 selftest checks are unchanged (suites re-run green
   from the new paths). The repo previously had no SKILL.md at all; the skill
   text that lived only in `~/.hermes/skills/` is now canonical in-repo.
-
-## [2.3.2] — 2026-08-26
-
-### Added — automatic agent wiring at install time
-
-The board is advisory, so installing the scripts alone protected nobody:
-sessions consult it only when their standing instructions say to. The
-installer now wires that enrollment itself.
-
-- `install.py` appends the canonical standing memory rule to the agent's
-  memory store by default (`~/.hermes/memories/MEMORY.md`, i.e.
-  `<HERMES_HOME>/memories/MEMORY.md`; `--memory-file` overrides,
-  `--no-wire-memory` opts out). The append is byte-faithful to the store's
-  own writer (entries joined by `\n§\n`) so the rule lands as a genuine
-  standalone entry, carries the stable marker `session-coord (wire v1)` for
-  idempotent re-runs, backs the previous file up to `<name>.bak-<ts>`, and
-  fails open — a machine with no Hermes memory store prints the entry for
-  manual placement and installs everything else anyway. `--check` previews
-  the wiring step.
-- `examples/memory-entry.example.md`: the canonical "always call it" entry
-  with the three delivery paths (ask the agent / edit the file / installer)
-  and an instruction block for an agent performing the install itself.
-- README §8.1 "Wire it into the agent" and a threat-model row for
-  non-participating sessions (the failure this closes).
-- CI: installer smoke test now re-runs the installer against a scratch
-  memory store and asserts exactly one wire marker survives.
 
 ## [2.3.2] — 2026-08-26
 
@@ -233,7 +265,7 @@ leaving the code, the board data, and the cron wiring exactly in place.
   up to `<name>.bak-<ts>` before being replaced. Idempotent — safe to re-run to
   upgrade in place. Verified end-to-end (live claim survives re-install).
 
-### Added — enrollment examples (were only in the private skill)
+### Added — enrollment examples
 
 - **`examples/bot-soul-coordination.example.md`** and
   **`examples/subagent-prompt.example.md`** — ready-to-paste protocol texts for
@@ -249,10 +281,9 @@ leaving the code, the board data, and the cron wiring exactly in place.
 
 ### Docs
 
-- New README §3.17 (the master switch) + §8 install rewrite leading with
-  `install.py`; command-tour, threat-model, and testing tables updated (90 →
-  118 checks). Enrollment examples linked from §3.16.
-- README §3.16 field note from live deployment: the cron radar surfaces
+- New README master-switch and installation guidance leading with `install.py`;
+  command-tour, threat-model, and testing tables updated (90 → 118 checks).
+- Cron-radar guidance notes that the radar surfaces
   *schedules, not run health* — check the store's `last_status`/`failure_streak`
   when a radar entry matters. Concrete trap documented: bot-profile routines
   resolve bare `script:` filenames against the owning profile's own scripts
@@ -286,7 +317,7 @@ per-bot scopes — every actor sees every other actor's claims identically.
   store contributes nothing and breaks nothing.
 - **`resolve_cron_job` error clarity**: the no-match error now names both
   store locations.
-- Documented the bot co-worker protocol (README §3.16): protocol travels in
+- Documented the bot co-worker protocol: protocol travels in
   the bot's standing prompt (handoff runs inherit no env); bot-to-bot chat is
   negotiation (ETA, early release, batching) but never a lock — only a
   successful claim authorizes mutation; ranks stay human-set.
