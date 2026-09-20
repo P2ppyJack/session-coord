@@ -200,7 +200,22 @@ usefulness:
 
 - Every claim carries a **TTL** (default 90 min, settable per claim). Expired claims are
   reaped lazily by any board touch, with an `EXPIRED` notification to the former holder.
-- Sessions unseen for 24 h are marked stale and their claims released.
+- Every session carries a **liveness stamp** (`last_seen`) that any board interaction
+  refreshes. A session that goes silent past the **stale window** (`STALE_SESSION_S`,
+  default 60 min, configurable via `HERMES_COORD_STALE_S`) is marked **stale**, and a
+  stale holder's claims are **auto-reaped** (audited `reaped` status): the holder and
+  overlapping waiters get a "VERIFY resource state" caveat, so a session that finished
+  but forgot `done` stops blocking co-workers in ~an hour instead of riding out its TTL.
+- **`heartbeat`** — a long-running holder whose work is genuinely quiet can call
+  `session_coord.py heartbeat --id <id>` every few minutes to keep its stamp fresh, so
+  the stale reaper never mistakes busy-but-silent work for a dead session.
+- **`coord_run.sh` — the guaranteed-`done` runner.** Wrap any one-shot, subagent
+  shell-out, or cron body in it and `done` runs on *every* exit path (normal, error,
+  Ctrl-C, SIGTERM), so such a runner can never leave a stale claim even without the
+  safety net: `coord_run.sh --task "<task>" --res <key>... -- <cmd> [args...]`.
+- **Malformed `--id` guard** — a claim made under an id contaminated with whitespace or
+  `#`-comment text (from capturing human-readable `register` output) is rejected before
+  it can auto-create an undressable orphan session.
 - Notification history is pruned after 7 days.
 
 Lazy reaping (on next board touch) instead of a daemon keeps the system daemon-free —

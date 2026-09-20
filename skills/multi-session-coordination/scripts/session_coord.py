@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # EDIT HISTORY (newest first)
+# 2026-09-19 | deepseek-ai/DeepSeek-V4-Flash-Vision-Exp | dgx-coder | desktop session | v2.5 stale-claim auto-recovery: heartbeat verb; STALE_SESSION_S 24h->60m (env HERMES_COORD_STALE_S); reap() auto-REAPs a stale holder's held claims ('reaped', holder+waiters notified); status refreshes caller liveness + recent/cleanup views include 'reaped'; claim rejects a malformed --id before it can mint an orphan; added coord_run.sh (guaranteed-done runner) to the install payload.  # noqa: E501
 # 2026-08-31 | claude-fable-5 | anthropic | desktop session | v2.4.0 bot enrollment audit: unenrolled_bot_profiles() scans <profiles>/*/SOUL.md for the BOT_WIRE_MARKER ("session-coord (bot-wire v1)", shipped inside the SOUL.md blurb install.py now appends); cmd_status lists persona-bearing profiles missing it as "— UNENROLLED bot profiles" + unenrolled_bot_profiles in --json, naming the fix. Read-only, fail-open; SOUL-less profiles never flagged (nothing proves they are bots). Companion unwired_profiles(): SOUL-less profiles whose OWN memories/MEMORY.md exists without the standing rule ("session-coord (wire v1)") -> UNWIRED warning + unwired_profiles in --json (store-less fresh profiles never flagged — no evidence; bots are the blurb audit's job). Closes the invisible-unenrolled-actor gap: enrollment is per-persona/per-profile-store and manual post-install, and a missed paste previously surfaced only as a collision. selftest_cron.sh 45->51.  # noqa: E501
 # 2026-08-26 | claude-opus-4-8 | anthropic | desktop session | MASTER SWITCH: whole coordination layer can be turned OFF without uninstalling — `enable`/`disable`/`switch [on|off|toggle]` verbs (persistent sentinel ~/.hermes/state/coordination_disabled; env HERMES_COORD_DISABLED overrides both directions). While OFF every verb is a fail-open no-op (register still prints a synthetic 12-hex id, claim/check succeed FREE, cron-guard stdout stays empty) so a disabled board == "not installed"; switch verbs themselves always run. coordination_enabled()/switch_source() helpers; main() gate short-circuits to disabled_noop(). Mirrors coord_guard.sh _coord_disabled(). 90/90 existing checks still green (enabled path byte-identical) + selftest_toggle.sh 28 new checks.  # noqa: E501
 # 2026-08-18 | claude-fable-5 | anthropic | desktop session | v2.2 Bot Mode integration: cron_store_jobs() now merges EVERY profile store (~/.hermes/profiles/*/cron/jobs.json — a Bot Mode bot IS a profile; its Routines live in its own store) with the default store (id collision: default wins); profile jobs get a "[bot:<profile>]" name tag surfaced through radar/advisories/guard/wait-for-cron; upcoming_cron_conflicts + status rows carry "profile"; resolve_cron_job error names both store locations; HERMES_COORD_PROFILES_DIR override for tests  # noqa: E501
@@ -154,7 +155,12 @@ MIGRATIONS = {
 }
 
 DEFAULT_TTL_MIN = 90.0
-STALE_SESSION_S = 24 * 3600
+# v2.5: a session goes 'stale' after this much silence, and a stale holder's
+# claims are auto-reaped (released + waiters notified) so a session that
+# finished WITHOUT running `done` stops blocking co-workers. Configurable via
+# HERMES_COORD_STALE_S. Default 60m balances recall against safety; long
+# holders should call the `heartbeat` verb so this never misfires on busy work.
+STALE_SESSION_S = float(os.environ.get("HERMES_COORD_STALE_S", str(60 * 60)))
 EXPIRED_KEEP_S = 7 * 24 * 3600
 POLL_FRESH_S = 30               # a waiter fences only while actively polling
                                 # (claim --wait touches last_poll every ~4s);
@@ -507,12 +513,51 @@ def reap(conn):
         "UPDATE sessions SET status='stale' WHERE status='active' AND last_seen < ?",
         (t - STALE_SESSION_S,),
     )
+    # v2.5: auto-REAP the held claims of every stale session — recovers the
+    # "co-worker says WAITING, but the holder finished without running `done`"
+    # case. Claims are marked 'reaped' (automatic + audited, distinct from a
+    # user-issued 'stolen'); the holder and overlapping waiters are notified
+    # with the same VERIFY-resource-state caveat as TTL expiry; the board stays
+    # advisory and never touches a remote process.
+    for sid in [r["id"] for r in conn.execute(
+            "SELECT id FROM sessions WHERE status='stale'").fetchall()]:
+        for c in conn.execute(
+                "SELECT * FROM claims WHERE status='held' AND session_id=?",
+                (sid,)).fetchall():
+            conn.execute(
+                "UPDATE claims SET status='reaped', released_at=? WHERE id=?",
+                (t, c["id"]),
+            )
+            notify(
+                conn, c["session_id"], None, c["resource"], "reaped",
+                f"Your claim on {c['resource']} was auto-REAPED because session "
+                f"{short(c['session_id'])} went stale (no heartbeat for a full "
+                f"stale window). The resource's real state is NOT verified — "
+                f"check it before you resume.",
+                dedupe=True,
+            )
+            for w in conn.execute(
+                    "SELECT * FROM waiters WHERE active=1 AND session_id != ?",
+                    (c["session_id"],)).fetchall():
+                if resources_overlap(norm_resource(w["resource"]), c["resource"]):
+                    notify(
+                        conn, w["session_id"], c["session_id"], c["resource"],
+                        "reaped",
+                        f"Claim on {c['resource']} was REAPED (holder "
+                        f"{short(c['session_id'])} went stale, task "
+                        f"'{c['task']}'). The board now shows it free — VERIFY its "
+                        f"real state before proceeding.",
+                        dedupe=True,
+                    )
+                    conn.execute("UPDATE waiters SET active=0 WHERE id=?",
+                                 (w["id"],))
     conn.execute(
         "UPDATE waiters SET active=0 WHERE active=1 AND session_id IN "
         "(SELECT id FROM sessions WHERE status IN ('done','stale'))"
     )
     conn.execute(
-        "DELETE FROM claims WHERE status IN ('released','expired','stolen') AND released_at < ?",
+        "DELETE FROM claims WHERE status IN ('released','expired','stolen','reaped') "
+        "AND released_at < ?",
         (t - EXPIRED_KEEP_S,),
     )
     conn.execute(
@@ -1108,6 +1153,17 @@ def cmd_claim(a):
         print("error: --id required (or set HERMES_COORD_ID)", file=sys.stderr)
         return 1
     conn = db()
+    # v2.5: reject a malformed --id before it can auto-create an undressable
+    # orphan session. The '#   <hex>' rows come from capturing non-JSON
+    # `register` output (newlines + '# ' comment lines) into the id. Enforce the
+    # same regex `register` uses on `--id`; a claim under a bad id must fail
+    # loudly, never mint an orphan. (`claim` is NOT in _ID_RESOLVING_VERBS, so
+    # the id arrives raw here and must be validated.)
+    if a.id and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{3,63}$", a.id):
+        print(f"error: --id '{a.id}' malformed — use `register --json` (or "
+              "capture only the first line) to mint a clean session id, then "
+              "claim under it", file=sys.stderr)
+        return 1
     # Orphan-proofing (v2.3.2): a claim under an id that was never registered
     # auto-creates a minimal session row, so release/done can always resolve
     # the id later. Claims must never be easier to make than to release.
@@ -1604,6 +1660,10 @@ def cmd_status(a):
     conn = db()
     conn.execute("BEGIN IMMEDIATE")
     reap(conn)
+    # v2.5: `status` is itself a board interaction — refresh the caller's
+    # liveness so a session that polls `status` on a long task is never mistaken
+    # for dead and auto-reaped (only truly silent holders go stale).
+    touch_session(conn, a.id)
     conn.execute("COMMIT")
     t = now()
     sess = conn.execute(
@@ -1616,7 +1676,8 @@ def cmd_status(a):
     waiters = conn.execute(
         "SELECT * FROM waiters WHERE active=1 ORDER BY since").fetchall()
     recent_expired = conn.execute(
-        "SELECT * FROM claims WHERE status IN ('expired','stolen') AND released_at > ? "
+        "SELECT * FROM claims WHERE status IN ('expired','stolen','reaped') "
+        "AND released_at > ? "
         "ORDER BY released_at DESC LIMIT 10", (t - 86400,),
     ).fetchall()
     payload = {
@@ -1769,6 +1830,19 @@ def cmd_steal(a):
     conn.execute("COMMIT")
     emit({"stolen": stolen, "reason": a.reason}, a.json,
          ["FORCE-RELEASED: " + (", ".join(stolen) if stolen else "(nothing matched)")])
+    return 0
+
+
+def cmd_heartbeat(a):
+    """Verb: refresh this session's liveness stamp (no claim, no waiter row).
+    A long-running holder calls this periodically so the stale reaper never
+    mistakes it for a finished/dead session and auto-reaps its claims."""
+    conn = db()
+    conn.execute("BEGIN IMMEDIATE")
+    touch_session(conn, a.id)
+    conn.execute("COMMIT")
+    emit({"ok": True, "session": short(a.id), "heartbeat_at": now()}, a.json,
+         [f"heartbeat {short(a.id)} — liveness refreshed."])
     return 0
 
 
@@ -2178,6 +2252,11 @@ def main():
     sp = sub.add_parser("status", help="the whole board: sessions, claims, waiters, warnings")
     common(sp)
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("heartbeat",
+                        help="refresh my liveness stamp (prevents stale auto-reap)")
+    common(sp)
+    sp.set_defaults(fn=cmd_heartbeat)
 
     sp = sub.add_parser("prioritize", help="record the USER's priority order (live re-fence)")
     sp.add_argument("--id", default=os.environ.get("HERMES_COORD_ID"),

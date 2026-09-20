@@ -5,6 +5,39 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-09-19
+
+### Added — stale-claim auto-recovery + guaranteed `done` runner
+
+A session that *finishes* — but never runs `done` — used to leave its claims
+blocking co-workers for up to the whole TTL (90–240m). That is the "co-worker
+says WAITING but the holder is gone" case. v2.5 closes it at both layers.
+
+- **`heartbeat` verb** — `session_coord.py heartbeat --id <id>` refreshes a
+  holder's liveness stamp without touching any claim. A long-running holder
+  calls it every few minutes so the stale reaper never mistakes busy-but-silent
+  work for a dead session.
+- **Stale auto-reap** — `reap()` now, when a session goes stale (no heartbeat
+  beyond the stale window), releases its held claims with the new audited
+  `reaped` status, notifying the holder and overlapping waiters with the same
+  "VERIFY resource state" caveat as TTL expiry. The board stays advisory and
+  never touches a remote process.
+- **`STALE_SESSION_S` lowered & configurable** — from 24h to a 60m default,
+  overridable via `HERMES_COORD_STALE_S`, so a finished-but-unreleased holder
+  stops blocking co-workers in ~an hour instead of a day. `status` now also
+  refreshes the caller's liveness (a session that polls the board stays fresh),
+  and `recent_expired_or_stolen` / row cleanup include `reaped`.
+- **Malformed-`--id` guard** — `claim` rejects a `--id` containing whitespace,
+  newlines, or `#`-comment text (the `#   <hex>` orphan rows caused by capturing
+  non-JSON `register` output into the id) *before* it can auto-create an
+  undressable auto-registered session.
+- **`coord_run.sh` — guaranteed-`done` runner** — wraps any one-shot, subagent
+  shell-out, or cron body so `done` runs on **any** exit (normal, error,
+  SIGINT/TERM/HUP, command-not-found): register → atomic claim → command →
+  guaranteed release. `--res` repeated for the full set, `--wait`/`--timeout` to
+  poll politely, `--ttl` for long work, default fail-fast rc 75 on held.
+  Installed by `install.py` and available at `~/.hermes/scripts/coord_run.sh`.
+
 ## [2.4.0] — 2026-08-31
 
 ### Added — bot enrollment: automatic wiring + board audit

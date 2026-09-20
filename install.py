@@ -88,6 +88,7 @@ SKILL_BUNDLE = (
 PAYLOAD = {
     "session_coord.py": True,
     "coord_guard.sh": False,
+    "coord_run.sh": True,
     "selftest.sh": True,
     "selftest_priority.sh": True,
     "selftest_cron.sh": True,

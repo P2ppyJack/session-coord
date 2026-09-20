@@ -1,7 +1,7 @@
 ---
 name: multi-session-coordination
 description: "Coordinate concurrent sessions: claim shared resources."
-version: 2.4.0
+version: 2.5.0
 author: Tobias Musser (P2ppyJack), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -11,6 +11,7 @@ metadata:
     related_skills: [github-repo-management, github-issues, github-code-review, github-issue-to-pr]
 ---
 <!-- EDIT HISTORY (newest first; max ~5 entries, older -> references/edit-history.md)
+2026-09-19 | deepseek-ai/DeepSeek-V4-Flash-Vision-Exp | dgx-coder | desktop session | v2.5 STALE-CLAIM AUTO-RECOVERY: added the `heartbeat` verb (refreshes a holder's liveness so the stale reaper never mistakes busy-but-silent work for a dead session); lowered STALE_SESSION_S from 24h to 60m (env HERMES_COORD_STALE_S) and made `reap()` auto-REAP a stale holder's held claims (audited `reaped` status, holder+waiters notified with the VERIFY-resource caveat) so a session that finished without running `done` stops blocking co-workers in ~the stale window instead of riding its TTL; `status` now refreshes the caller's liveness and its recent/cleanup views include `reaped`; `claim` rejects a malformed `--id` (newline/space/`#`-comment ids like the `#   <hex>` orphans) before it mints an undressable auto-registered session; added `coord_run.sh`, a guaranteed-`done` runner for one-shot/subagent/cron bodies (register → claim → command → `done` on ANY exit), installed by `install.py`.
 2026-08-31 | claude-fable-5 | anthropic | desktop session | Session lessons (docs-only): Pitfalls gains TTL sizing/re-claim guidance (two 90m leases silently expired across ~2h of connection outages during the v2.4.0 pass — claim --ttl 240+ for long work, idempotent re-claim after interruptions, status-check before resuming). publishing-and-ci.md gains the tokenless-GitHub-Release-via-Chrome recipe (osascript JXA over browser_exec — the latter hung to 420s timeout twice; REST-verify the release) + poll-CI-from-terminal-not-execute_code (300s kernel timeout killed a polling loop).
 2026-08-31 | claude-fable-5 | anthropic | desktop session | v2.4.0 BOT ENROLLMENT hardening (Toby spotted the exemption-wording hazard): (1) blurb exemption tightened — "your OWN profile's memory" was blurrable into "things I made need no claim"; now names the EXACT profile-internal list, states self-created files in shared space still need claims, and disambiguates profile memory vs the machine's main memory store (template + example). (2) install.py step 7 wire_bots(): appends the blurb (marker "session-coord (bot-wire v1)") to every existing profiles/*/SOUL.md — default ON, --no-wire-bots/--profiles-dir; closes the each-new-bot-needs-a-manual-paste gap for existing bots. (3) status audits enrollment: persona-bearing profiles missing the marker -> UNENROLLED warning (+ unenrolled_bot_profiles in --json). (4) NON-BOT profiles (Toby spotted this gap too): a profile is a full agent instance whose own memory store the main rule never reaches — install.py step 8 wires the standing rule into each SOUL-less profile's memories/MEMORY.md (--no-wire-profiles), and status flags unwired ones (existing store without the rule; store-less = no evidence, never flagged). selftest_cron.sh 45->51 (133 total); CI wiring smoke step covers both legs.
 2026-08-30 | deepseek-v4-flash | custom | desktop session | OFFICIAL-SKILL PACKAGING: repo restructured to the Hermes skill layout (skills/multi-session-coordination/ with SKILL.md + references/ + templates/ + scripts/ + examples/) so `hermes skills install` / tap / direct-URL installs work; frontmatter brought to house standards (author human-first, platforms audited to [linux, macos], description <= 60 chars); body re-ordered to When to Use / Prerequisites / How to Run / Quick Reference / Procedure / Pitfalls / Verification with Hermes-tool framing; install.py gains a skill-bundle install step (--skill-dest / --no-skill); tool location made path-robust (install.py vs skill-bundle installs).
@@ -100,6 +101,29 @@ The CLI fails **open**: if the board DB is unavailable it warns on stderr and pr
 (exit 0) — coordination must never strand real work. Exit codes: `0` ok/free, `75`
 held/queued (same as `singleflight.sh`), `1` error. `--json` on every command.
 
+### Guaranteed-`done` runner (one-shot / subagent / cron)
+
+`scripts/coord_run.sh` wraps a command so it **always** runs `done`, no matter how the
+process ends (normal, error, SIGINT/TERM/HUP, command-not-found). Use it for a shell
+one-shot, a subagent that shells out, or a cron body that must never strand a claim — it
+is the hard complement to the stale auto-reap safety net (which only fires after the
+holder goes silent). Installed by `install.py` to `~/.hermes/scripts/coord_run.sh`.
+
+```bash
+# run a command under a claim; claim/`done` are guaranteed on ANY exit
+~/.hermes/scripts/coord_run.sh --task "<task>" \
+  --res "file:~/some/dir" --res "box:gpu-box-1" --ttl 240 \
+  --wait --timeout 600 -- <cmd> [args...]
+```
+
+Flags: `--task` (required), `--res` (repeatable, required), `--id` / `--surface` (defaults
+`cli`), `--ttl` (default 90; 240+ for multi-hour), `--wait` + `--timeout` to poll politely
+instead of failing. Without `--wait`, a held resource returns **rc 75** without running the
+command (and the wrapper deregisters its own row — it never leaves a stale claim). On
+`--wait`, it acquires the moment the holder releases. On held without `--wait`, a cron
+body can `|| exit 0` to skip the tick silently (the `coord_guard` `skip` convention).
+It reads `HERMES_COORD_CLI` to override the CLI path.
+
 ## Quick Reference
 
 | Verb | Purpose |
@@ -109,6 +133,7 @@ held/queued (same as `singleflight.sh`), `1` error. `--json` on every command.
 | `check` / `wait` | See who holds what; block until a resource frees |
 | `release --id $ID [--res <key>]` / `done --id $ID` | Free one resource / everything + deregister + notify waiters |
 | `status` | Whole-board view: holders, tasks, ranks, waiters, 12 h cron radar |
+| `heartbeat --id $ID` | Refresh a holder's liveness stamp (no claim) — run every few minutes on a long task so the stale reaper never auto-reaps it |
 | `inbox --id $ID` | Read-once notifications (released / EXPIRED / preempt requests) |
 | `prioritize --session S --rank N` or `--order "a=1,b=2"` | **User-only**: set/clear ranks (never self-assign) |
 | `preempt --id $ID --res <key>` | Ask a strictly-lower-ranked holder to checkpoint + pause + yield |
@@ -287,6 +312,17 @@ ON. The shell guard honors it without spawning Python.
   re-issue the same `claim` under your id (idempotent) to refresh the lease, and check
   `status` before resuming writes in case a co-worker claimed in the gap. (Bit the
   v2.4.0 release pass: ~2 h of interruptions outlived two 90 m leases.)
+- **Stale auto-reap (v2.5).** A session that holds a claim but goes silent past the
+  stale window (`STALE_SESSION_S`, default 60 m, env `HERMES_COORD_STALE_S`) is marked
+  *stale* and its held claims are auto-REAPED (status `reaped`), freeing the resource and
+  notifying waiters with the "VERIFY resource state" caveat. This is what stops a session
+  that FINISHED without running `done` from blocking co-workers for the rest of its TTL.
+  If a task legitimately runs long without touching the board, protect it with
+  `heartbeat --id $ID` every few minutes — a heartbeat refreshes `last_seen` and keeps the
+  stale reaper away; without it, a >60 m silent holder WILL be reaped. Reap is not a
+  workload guard: `box:`/remote claims are released on the board only, never a remote
+  process, so verify real state before starting new mutating work (same rule as TTL
+  expiry).
 - Board unreadable (disk full, corrupt DB): tool fails open with a stderr WARNING —
   treat as "flying blind", tell the user, avoid shared-resource mutation until resolved.
 - **Platforms:** the engine is cross-platform Python (CI-verified on Windows via Git
