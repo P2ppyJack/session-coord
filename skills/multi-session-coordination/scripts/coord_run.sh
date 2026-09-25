@@ -63,7 +63,7 @@ export HERMES_COORD_ID="$ID"
 # guaranteed release on ANY exit path, including a claim that fails (below).
 # A `done` on a session with no acquired claims is harmless (just deregisters
 # the auto-registered row); it can never leave a stale claim behind.
-release() { "$PY" "$SC" done --id "$ID" >/dev/null 2>&1 || true; }
+release() { "$PY" "$SC" "done" --id "$ID" >/dev/null 2>&1 || true; }
 trap release EXIT INT TERM HUP
 
 # 2) claim the full set in ONE atomic call (never acquire piecemeal).

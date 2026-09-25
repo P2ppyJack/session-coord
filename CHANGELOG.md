@@ -1,437 +1,188 @@
 # Changelog
 
-All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-versioning follows [SemVer](https://semver.org/).
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versioning follows
+[Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-09-25
+
+### Added
+
+- Added an interactive installer choice for keeping the current plugin state,
+  installing or upgrading optional native integration, removing only that
+  integration, or canceling. Non-interactive runs keep the current state unless
+  an action is explicit.
+- Added plugin-only removal that preserves the standalone board, claims, skills,
+  receipt state, shared watchdog, unrelated plugins, and profile configuration.
+  Recovery copies and exact state readback protect removal and repeated runs.
+- Added `hermes_setup.py` for explicit, profile-scoped native-integration checks
+  and setup. It validates the external `session-coord-native` checkout through
+  Hermes Plugin Doctor, uses sanctioned plugin and configuration commands, and
+  distinguishes on-disk configuration from activation after restart.
+- Added an optional shared watchdog setup that delegates to the plugin-owned
+  `watchdog-setup` command and refuses blind retries after uncertain creation.
+- Added durable native wake records, exact receiver receipts, cancellation
+  fencing, whole-request reacquisition, and script-only wake reconciliation.
+
+### Changed
+
+- Installer enrollment now uses versioned `board-v2` and `bot-board-v2` managed
+  blocks. Recognized wire-v1 and bot-wire-v1 text is migrated with backups while
+  customized, duplicated, or malformed blocks remain unchanged and return
+  `ACTION NEEDED`.
+- Default enrollment is board-only. Native yield instructions are written only
+  after every selected profile proves the required host and plugin capabilities.
+- Enrollment audits now require exact managed blocks, preserve file modes, and
+  use compare-and-swap checks before replacing a carrier.
+- Generated shell snippets preserve custom paths as single literal arguments.
+- Native setup validates plugin identity, source cleanliness, installed revision,
+  exact Boolean joined-delegation policy, and plugin-owned capability receipts.
+- Documentation separates the stable framework-neutral board from optional,
+  unreleased native continuation.
+
+### Compatibility
+
+- Existing board CLI contracts, SQLite state, cron manifests, script-only guards,
+  custom paths, opt-outs, and legacy JSON contracts remain supported.
+- Native continuation requires the separate `session-coord-native` plugin and a
+  compatible Hermes host; board-only operation does not.
+
 ## [2.5.0] — 2026-09-19
 
-### Added — stale-claim auto-recovery + guaranteed `done` runner
+### Added
 
-A session that *finishes* — but never runs `done` — used to leave its claims
-blocking co-workers for up to the whole TTL (90–240m). That is the "co-worker
-says WAITING but the holder is gone" case. v2.5 closes it at both layers.
+- Added `heartbeat` to refresh a quiet holder's liveness without changing claims.
+- Added stale-session reaping that releases abandoned claims with an audited
+  `reaped` state and warns actors to verify the real resource.
+- Added `coord_run.sh`, a one-command runner that registers, claims an atomic
+  resource set, runs a command, and guarantees `done` on normal exit, failure, or
+  termination.
 
-- **`heartbeat` verb** — `session_coord.py heartbeat --id <id>` refreshes a
-  holder's liveness stamp without touching any claim. A long-running holder
-  calls it every few minutes so the stale reaper never mistakes busy-but-silent
-  work for a dead session.
-- **Stale auto-reap** — `reap()` now, when a session goes stale (no heartbeat
-  beyond the stale window), releases its held claims with the new audited
-  `reaped` status, notifying the holder and overlapping waiters with the same
-  "VERIFY resource state" caveat as TTL expiry. The board stays advisory and
-  never touches a remote process.
-- **`STALE_SESSION_S` lowered & configurable** — from 24h to a 60m default,
-  overridable via `HERMES_COORD_STALE_S`, so a finished-but-unreleased holder
-  stops blocking co-workers in ~an hour instead of a day. `status` now also
-  refreshes the caller's liveness (a session that polls the board stays fresh),
-  and `recent_expired_or_stolen` / row cleanup include `reaped`.
-- **Malformed-`--id` guard** — `claim` rejects a `--id` containing whitespace,
-  newlines, or `#`-comment text (the `#   <hex>` orphan rows caused by capturing
-  non-JSON `register` output into the id) *before* it can auto-create an
-  undressable auto-registered session.
-- **`coord_run.sh` — guaranteed-`done` runner** — wraps any one-shot, subagent
-  shell-out, or cron body so `done` runs on **any** exit (normal, error,
-  SIGINT/TERM/HUP, command-not-found): register → atomic claim → command →
-  guaranteed release. `--res` repeated for the full set, `--wait`/`--timeout` to
-  poll politely, `--ttl` for long work, default fail-fast rc 75 on held.
-  Installed by `install.py` and available at `~/.hermes/scripts/coord_run.sh`.
+### Changed
+
+- The default stale-session window is 60 minutes and can be overridden with
+  `HERMES_COORD_STALE_S`.
+- `status` refreshes caller liveness, and cleanup includes reaped claims.
+- `claim` rejects malformed session ids before they can create unusable sessions.
 
 ## [2.4.0] — 2026-08-31
 
-### Added — bot enrollment: automatic wiring + board audit
+### Added
 
-Bots enroll via their persona file (SOUL.md), not memory — handoff runs
-inherit no environment. Until now that paste was entirely manual and entirely
-invisible when missed: a bot without the blurb never consults the board, and
-nothing anywhere said so. Both halves are now closed.
+- The installer now enrolls existing bot profiles through `SOUL.md` and non-bot
+  profiles through their own memory stores.
+- `status` reports persona profiles without the current bot block as `UNENROLLED`
+  and non-bot profiles without the current board block as `UNWIRED`.
 
-- `install.py` step 7 (`wire_bots`): appends the coordination blurb from
-  `templates/bot-soul-coordination.md` (with `<botname>` substituted) to every
-  existing `<profiles>/<name>/SOUL.md`. Default ON; `--no-wire-bots` opts out;
-  `--profiles-dir` (or `$HERMES_COORD_PROFILES_DIR`) overrides the location.
-  Idempotent via the `session-coord (bot-wire v1)` marker (shipped inside the
-  blurb), previous SOUL.md backed up to `.bak-<ts>`, fail-open like the memory
-  wiring. Profiles with no SOUL.md are reported, never invented. `--check`
-  previews the step.
-- **Enrollment audit in `status`**: any profile that HAS a SOUL.md but lacks
-  the marker is listed under `— UNENROLLED bot profiles` (and as
-  `unenrolled_bot_profiles` in `--json`), with the fix named — so a bot
-  created after install surfaces on the board view everyone already runs,
-  instead of staying invisible until it stomps something. Read-only,
-  fail-open; profiles without a persona are never flagged (nothing proves
-  they are bots).
-- `install.py` step 8 (`wire_profile_memories`): **non-bot profiles** are full
-  agent instances with their OWN memory stores — the main store's standing
-  rule never reaches their sessions. The rule is now appended to each
-  SOUL-less profile's `<profiles>/<name>/memories/MEMORY.md` (created if
-  absent; `--no-wire-profiles` opts out). Bot profiles are skipped here: the
-  SOUL.md blurb is their carrier, and double-wiring would cost tokens every
-  turn.
-- **Profile audit in `status`**: a SOUL-less profile whose own memory store
-  exists WITHOUT the standing rule is listed under `— UNWIRED profiles`
-  (`unwired_profiles` in `--json`). Store-less fresh profiles are never
-  flagged — an existing store proves agent sessions run there; absence of
-  one is no evidence (escalate only on confirmation).
+### Changed
 
-### Changed — exemption wording in the bot blurb (template + example)
-
-The blurb's claim-free carve-out read "your OWN profile's memory, sessions,
-and cron store are yours alone." Correct, but blurrable by a weaker model into
-"things that are *mine* need no claim" — inviting exactly the unregistered
-mutation the board exists to prevent (a bot's self-created output dir in
-shared space, or "my memory" misread as the machine's main memory store). The
-wording now names the exemption as EXACTLY the profile-internal stores, states
-that self-created files/dirs in shared space still need claims, and
-disambiguates profile memory from the machine's main memory store. The marker
-line doubles as the enrollment-audit sentinel.
-
-### Tests / CI
-
-- `selftest_cron.sh` 45 → 51 (133 total): bot audit flags an unenrolled
-  persona-bearing profile, `--json` carries `unenrolled_bot_profiles`, the
-  marker clears the flag, SOUL-less profiles never flagged by the bot leg;
-  profile audit flags an unwired non-bot profile (and in `--json`), the
-  standing rule clears it, store-less profiles never flagged.
-- CI: new installer wiring smoke step (bot blurb + profile memory: wire +
-  idempotent re-run + marker counts + no-persona SOUL untouched + bot not
-  double-wired into memory + audits clean after wiring).
+- Bot enrollment text now limits claim-free access to the profile's internal
+  memory, sessions, and cron store; files in shared locations still require claims.
 
 ## [2.3.3] — 2026-08-30
 
-### Added — automatic agent wiring at install time (folded in from the previous
-commit's Unreleased notes — the wire-in step shipped with this release)
+### Added
 
-The board is advisory, so installing the scripts alone protected nobody:
-sessions consult it only when their standing instructions say to. The
-installer now wires that enrollment itself.
+- Added the standard installable Hermes skill layout under
+  `skills/multi-session-coordination/`, including scripts, references, templates,
+  and examples.
+- The full installer now copies the skill bundle and can wire the canonical board
+  instruction into the default memory store.
 
-- `install.py` appends the canonical standing memory rule to the agent's
-  memory store by default (`~/.hermes/memories/MEMORY.md`, i.e.
-  `<HERMES_HOME>/memories/MEMORY.md`; `--memory-file` overrides,
-  `--no-wire-memory` opts out). The append is byte-faithful to the store's
-  own writer (entries joined by `\n§\n`) so the rule lands as a genuine
-  standalone entry, carries the stable marker `session-coord (wire v1)` for
-  idempotent re-runs, backs the previous file up to `<name>.bak-<ts>`, and
-  fails open — a machine with no Hermes memory store prints the entry for
-  manual placement and installs everything else anyway. `--check` previews
-  the wiring step.
-- `examples/memory-entry.example.md`: the canonical "always call it" entry
-  with the three delivery paths (ask the agent / edit the file / installer)
-  and an instruction block for an agent performing the install itself.
-- README §8.1 "Wire it into the agent" and a threat-model row for
-  non-participating sessions (the failure this closes).
-- CI: installer smoke test now re-runs the installer against a scratch
-  memory store and asserts exactly one wire marker survives.
+### Changed
 
-### Added — official Hermes skill packaging
-
-The repo now follows the standard Hermes skill layout, so the project is
-installable as an **official skill** through the Skills Hub:
-
-- **New layout**: everything the skill needs moved under
-  `skills/multi-session-coordination/` — `SKILL.md` (canonical, house-standard
-  frontmatter: author human-first `Tobias Musser (P2ppyJack)`, `platforms:
-  [linux, macos]` audited against the POSIX selftests, ≤60-char description)
-  plus `references/` (edit-history archive, publishing & CI notes),
-  `templates/` (bot SOUL.md blurb, machine-generic), `scripts/` (the engine:
-  CLI + guard + 4 selftest suites), and `examples/` (enrollment texts, cron
-  manifest, wrapper).
-- **Install paths** (README §8): `hermes skills install
-  P2ppyJack/session-coord/skills/multi-session-coordination`, tap install, or
-  direct-URL install of the raw SKILL.md. A hub install copies SKILL.md +
-  referenced support files into `~/.hermes/skills/` (the CLI then lives in the
-  skill's `scripts/`); `install.py` remains the full-wiring path.
-- **`install.py` step 6**: installs the skill bundle itself (SKILL.md +
-  references/ + templates/ + examples/ → `~/.hermes/skills/multi-session-coordination`,
-  `--skill-dest` / `--no-skill`) with the same idempotent
-  backup-on-change policy as the payload — one command now delivers scripts +
-  skill + standing memory rule.
-- **CI**: new "skill bundle layout + frontmatter" gate (checks the official
-  skill contract: file placement, required frontmatter fields, ≤60-char
-  description, referenced files exist in-bundle, no machine-local paths) plus
-  an installer idempotency check that the skill bundle lands and a re-run
-  creates no backups. All paths moved to the new layout.
-
-### Compatibility
-
-- No engine changes: `session_coord.py`, `coord_guard.sh`, the rc 0/75
-  contract, and all 127 selftest checks are unchanged (suites re-run green
-  from the new paths). The repo previously had no SKILL.md at all; the skill
-  text that lived only in `~/.hermes/skills/` is now canonical in-repo.
+- Skill and memory enrollment are idempotent, preserve existing content, and back
+  up a changed carrier before replacement.
 
 ## [2.3.2] — 2026-08-26
 
-### Added — automatic agent wiring at install time
+### Added
 
-The board is advisory, so installing the scripts alone protected nobody:
-sessions consult it only when their standing instructions say to. The
-installer now wires that enrollment itself.
+- `register --id` now accepts validated caller-supplied session ids and supports
+  idempotent re-registration.
 
-- `install.py` appends the canonical standing memory rule to the agent's
-  memory store by default (`~/.hermes/memories/MEMORY.md`, i.e.
-  `<HERMES_HOME>/memories/MEMORY.md`; `--memory-file` overrides,
-  `--no-wire-memory` opts out). The append is byte-faithful to the store's
-  own writer (entries joined by `\n§\n`) so the rule lands as a genuine
-  standalone entry, carries the stable marker `session-coord (wire v1)` for
-  idempotent re-runs, backs the previous file up to `<name>.bak-<ts>`, and
-  fails open — a machine with no Hermes memory store prints the entry for
-  manual placement and installs everything else anyway. `--check` previews
-  the wiring step.
-- `examples/memory-entry.example.md`: the canonical "always call it" entry
-  with the three delivery paths (ask the agent / edit the file / installer)
-  and an instruction block for an agent performing the install itself.
-- README §8.1 "Wire it into the agent" and a threat-model row for
-  non-participating sessions (the failure this closes).
-- CI: installer smoke test now re-runs the installer against a scratch
-  memory store and asserts exactly one wire marker survives.
+### Fixed
 
-## [2.3.2] — 2026-08-26
-
-### Fixed — explicit session ids: registerable, and never orphaned
-
-`register` accepted no `--id`, yet `claim`/`release` did — so a caller that
-pre-minted a memorable id (`HERMES_COORD_ID=my-task-id`) hit a usage error on
-`register` (easily missed with stderr suppressed), then **successfully
-claimed** under that id anyway. The claims were orphans: `release --id`/`done
---id` refused with `no session matches`, and the resources stayed held until
-TTL expiry. Claims must never be easier to make than to release. Two-sided fix:
-
-- `register --id <explicit>` (default: env `HERMES_COORD_ID`) registers under
-  the **caller's** id. Ids are validated (`4-64 chars: alnum . _ -`, alnum
-  first; rc 2 on violation). Re-registering an existing explicit id is
-  **idempotent** — refreshes task/surface/liveness and reactivates a `done`
-  row instead of erroring. Auto-generated ids are unchanged when `--id` is
-  omitted. Disabled-mode (master switch OFF) `register` echoes the explicit id
-  so `ID=$(… register)` pipelines stay stable either way.
-- **Orphan-proofing at the claim side:** a `claim` under a never-registered id
-  auto-creates a minimal session row (`(auto-registered at claim)`), so every
-  claimable id is guaranteed resolvable by `release`/`done` later — even if
-  the caller skipped or fumbled `register`.
-
-`selftest.sh` gains 5 checks (23 → 28; **127 total**).
+- Claims made with a previously unknown id now create a minimal session row so
+  they can always be released with `release` or `done`.
 
 ## [2.3.1] — 2026-08-26
 
-### Fixed — `--id` now resolves prefixes and fails loudly
+### Fixed
 
-The board *displays* 8-character session ids but *stores* the full 12, so
-pasting a displayed id into `done`/`release`/`pause`/`resume`/`preempt`/`inbox`
-ran `... WHERE id=?` against a value that matched **no row** — the command
-printed its normal success line while changing nothing (a held claim silently
-survived a `release`). These verbs now resolve `--id` up front to a real session
-by full id **or unique prefix** (reusing the same resolver `prioritize` already
-used), and **exit non-zero** on a no-match (`error: no session matches '…'`) or
-an ambiguous prefix (`error: ambiguous prefix '…': …`). `register` (mints a new
-id) and the read/self-attributed `claim`/`check`/`wait` verbs are deliberately
-exempt. `selftest.sh` gains 4 checks (19 → 23; **122 total**).
+- Commands that target an existing session now resolve a full id or unique prefix
+  and fail on missing or ambiguous matches instead of silently doing nothing.
 
 ## [2.3.0] — 2026-08-26
 
-### Added — master switch (turn coordination off without uninstalling)
+### Added
 
-Coordination is cooperative: valuable when several actors share a machine, pure
-overhead for a solo operator. Rather than force an uninstall, the whole layer
-now has a single master switch that makes every verb a fail-open no-op while
-leaving the code, the board data, and the cron wiring exactly in place.
+- Added `switch`, `enable`, `disable`, and `switch toggle` for globally bypassing
+  coordination without uninstalling it or deleting state.
+- Added a standard-library installer with dry-run, relocation, upgrade backup,
+  state preservation, and optional self-verification.
+- Added ready-to-use bot and subagent enrollment examples.
 
-- **New verbs**: `switch` (report state + what is deciding it), `enable`,
-  `disable`, and `switch toggle`. The switch-management verbs always run, so you
-  can never lock yourself out.
-- **Fail-open no-op when OFF**: every coordination verb short-circuits while
-  preserving its stdout contract — `register` still prints a synthetic id (so
-  `ID=$(… register)` scripts keep working), `claim`/`check` return success/FREE,
-  and `cron-guard` emits empty stdout so the shell guard reads "run unguarded."
-  A disabled board behaves exactly as if coordination were never installed.
-- **Two layers, one decision, identical precedence**: `HERMES_COORD_DISABLED`
-  env override (both directions, one process tree) beats the persistent sentinel
-  file (`~/.hermes/state/coordination_disabled`, override
-  `HERMES_COORD_DISABLED_FILE`) beats the default (ON). `coord_guard.sh` honors
-  the same switch **without spawning Python** (zero cost when off), so disabling
-  instantly makes every cron wrapper run unguarded too — genuinely global.
-- **28-check `selftest_toggle.sh`** proves: OFF never blocks a caller on any
-  verb, ON restores full conflict detection, env overrides the sentinel both
-  ways, and the shell guard honors the switch. The 90 pre-existing checks prove
-  the enabled path is byte-for-byte unchanged. **118 checks total, all green.**
+### Changed
 
-### Added — one-command installer
-
-- **`install.py`** — cross-platform (Linux/macOS/Windows, Python ≥3.8), pure
-  standard library, no network. Copies the CLI + guard + selftests, creates the
-  state dir, and **self-verifies** by running the full selftest matrix (skip with
-  `--no-verify`). `--check` is a dry run; `--dest`/`--state-dir` relocate it.
-- **Never clobbers data**: an existing board DB and a customized
-  `cron_resources.json` are left untouched; a locally-modified script is backed
-  up to `<name>.bak-<ts>` before being replaced. Idempotent — safe to re-run to
-  upgrade in place. Verified end-to-end (live claim survives re-install).
-
-### Added — enrollment examples (were only in the private skill)
-
-- **`examples/bot-soul-coordination.example.md`** and
-  **`examples/subagent-prompt.example.md`** — ready-to-paste protocol texts for
-  concurrent named agents and fan-out children, which inherit no environment and
-  so must learn the protocol from their prompt. The README described this
-  requirement (§3.16) but the repo did not previously ship the texts.
-
-### CI
-
-- `tests` matrix now also runs `selftest_toggle.sh` and an `install.py` smoke
-  test; `lint` now runs ruff + bandit on `install.py` and shellcheck on
-  `selftest_toggle.sh`.
-
-### Docs
-
-- New README §3.17 (the master switch) + §8 install rewrite leading with
-  `install.py`; command-tour, threat-model, and testing tables updated (90 →
-  118 checks). Enrollment examples linked from §3.16.
-- README §3.16 field note from live deployment: the cron radar surfaces
-  *schedules, not run health* — check the store's `last_status`/`failure_streak`
-  when a radar entry matters. Concrete trap documented: bot-profile routines
-  resolve bare `script:` filenames against the owning profile's own scripts
-  directory, so a script placed in the shared/default scripts dir fails only at
-  fire time, invisibly to the radar. Verify fixtures with one live fire.
+- When coordination is disabled, board verbs and the shell guard preserve their
+  success/output contracts while acting as fail-open no-ops.
+- `HERMES_COORD_DISABLED` overrides the persistent disabled sentinel for one
+  process tree.
 
 ## [2.2.0] — 2026-08-18
 
-### Added — inter-bot deconfliction (concurrent named agents / bot profiles)
+### Added
 
-Coverage now extends to **bots**: persistent named agents that run as separate
-profiles side by side with interactive sessions — including their sub-sessions
-(bot-to-bot handoffs spawn fresh CLI runs) and their privately-stored scheduled
-routines. Deconfliction is inter-bot by construction: one shared board, no
-per-bot scopes — every actor sees every other actor's claims identically.
+- Added shared coordination for persistent bot profiles, their sub-sessions, and
+  their profile-specific scheduled jobs.
+- Cron discovery now merges the default store with profile stores and identifies
+  profile-owned jobs as `[bot:<profile>]`.
+- Added bot and subagent protocol examples for explicit registration, atomic
+  claims, and cleanup.
 
-- **Per-profile cron store merge**: `cron_store_jobs()` scans the default cron
-  store PLUS every `<profiles>/<name>/cron/jobs.json` (new
-  `HERMES_COORD_PROFILES_DIR` override, default `~/.hermes/profiles`). A bot's
-  routines now appear in the 12-hour radar, claim-time CRON ADVISORY warnings,
-  `cron-guard` resolution, and `wait-for-cron` — exactly like default-store jobs.
-- **`[bot:<profile>]` attribution**: profile jobs are name-tagged at load time
-  (already-tagged names are left alone), so every radar row, advisory, and
-  defer note names the owning bot with no extra lookups. Advisory and status
-  rows carry a `profile` field.
-- **Deterministic collision policy**: a job id present in both the default
-  store and a profile store resolves to the default store (first-seen wins;
-  profile scan order is sorted, so profile-vs-profile collisions are
-  deterministic too).
-- **Fail-open extended** (Rule 2): a missing, unreadable, or corrupt profile
-  store contributes nothing and breaks nothing.
-- **`resolve_cron_job` error clarity**: the no-match error now names both
-  store locations.
-- Documented the bot co-worker protocol (README §3.16): protocol travels in
-  the bot's standing prompt (handoff runs inherit no env); bot-to-bot chat is
-  negotiation (ETA, early release, batching) but never a lock — only a
-  successful claim authorizes mutation; ranks stay human-set.
+### Changed
 
-### Tests
-
-- `selftest_cron.sh` grows a hermetic v2.2 BOT LEG (7 checks, suite 38 → 45;
-  full matrix 83 → 90): profile-store radar visibility, advisory naming, guard
-  defer/acquire against a bot routine, double-tag prevention, collision
-  precedence, profile attribution, corrupt-store inertness. The suite pins
-  `HERMES_COORD_PROFILES_DIR` to scratch so real profiles never leak in.
-
-### Compatibility
-
-- No schema changes. All v1/v2/v2.1 commands, outputs, and the rc 0/75
-  contract are unchanged (19 + 26 v1/v2 suites re-run green). With no profiles
-  directory present, behavior is byte-for-byte v2.1.
+- Duplicate cron job ids resolve deterministically, with the default store taking
+  precedence and profile stores ordered by profile name.
+- Missing, unreadable, or malformed profile stores remain fail-open.
 
 ## [2.1.0] — 2026-08-16
 
-### Added — cron jobs as first-class coordination participants
-- `coord_guard.sh`: zero-token, fail-open guard sourced as step 0 of cron wrapper
-  scripts. Per-job policy `skip` (watchdogs: skip the tick instantly) or `wait`
-  (backups: bounded wait for the holder, then proceed). Conflicted agentic jobs
-  defer **before** any LLM starts. Guard proceeds unguarded on ANY internal error —
-  a broken board never blocks a backup.
-- `cron-guard` CLI verb backing the shell guard: registers an ephemeral cron
-  session, atomically claims the job's declared resources, prints only the
-  coordination id on stdout (safe for `no_agent` stdout-as-message jobs).
-- Cron resource manifest (`cron_resources.json`): declares per-job resources,
-  guard policy, and a `critical` flag. Missing or malformed manifest leaves every
-  cron feature inert (fail-open).
-- Claim-time **CRON ADVISORY**: claiming a resource an upcoming cron touches warns
-  about the clash (job name, fire time, overlapping resources). 12-hour cron radar
-  in `status` with per-job conflict flags.
-- **Critical-cron decision brief**: critical jobs never defer silently — the
-  advisory lists explicit options (finish & release / `wait-for-cron` / pause with
-  user approval / trigger early) and instructs the session to ask the user.
-- `wait-for-cron`: block (poll) until a job's fire is observed in the audit table.
-- `cron-note`: responsibility ledger for pausing/resuming cron jobs; `done` nags a
-  departing session about any cron it paused but never resumed.
-- `cron_events` audit table: every guard decision (`deferred` / `guarded-run` /
-  `fail-open`) is recorded.
-- Crons appear as `[CRON JOB]` holders; `preempt` refuses to target them (pausing
-  a scheduled job is a scheduler operation requiring user approval, not a peer
-  negotiation).
-- Polite holder notification when a cron defers: names the job, the held resource,
-  and that the tick was skipped.
+### Added
 
-### Fixed
-- **Rank fencing lost at the release boundary** (found by adversarial agent
-  review): waiter rows now stay active across a release so queue order
-  (rank, then FIFO) survives; replaced the 10-minute waiter liveness window with a
-  30-second poll-freshness gate (`waiters.last_poll` column, additive migration) —
-  only actively-polling waiters fence; paused resume spots remain exempt.
-- **Children not notified on inherited re-rank** (same review): `prioritize` now
-  diffs *effective* ranks including lineage-derived children and notifies every
-  session whose effective rank moved.
+- Added `coord_guard.sh` and `cron-guard` so scheduled jobs can claim declared
+  resources before starting model-backed work.
+- Added a cron resource manifest, upcoming-job advisories, a 12-hour cron radar,
+  `wait-for-cron`, `cron-note`, and a durable cron decision audit.
+- Added user-set priorities, queue fencing across release boundaries, and
+  inherited priority notifications for child sessions.
 
-### Portability / hardening
-- UTF-8-safe stdio (`errors="replace"`): hostile consoles (C locale, cp1252,
-  `PYTHONIOENCODING=ascii`) degrade to `?` placeholders instead of crashing.
-- Windows path normalization in resource keys (drive-letter and UNC absolutes,
-  case-insensitive canonicalization on Windows; identity on POSIX).
-- Python 3.8–3.13 verified (removed a 3.11-only `fromisoformat` dependency;
-  fixed a 3.13 `SyntaxWarning`).
-- 100% function docstring coverage; `bandit` 0 issues; strict `ruff` profile
-  (E,F,W,I,UP,SIM,ISC,RUF,B) 0 findings; `shellcheck` clean.
+### Changed
 
-### Tests
-- 38-check cron-leg suite (`selftest_cron.sh`) on scratch DB + scratch manifest +
-  scratch cron store. Full matrix now 83 checks (19 + 26 + 38), run green on
-  macOS and Ubuntu.
+- File resource keys support POSIX, Windows drive-letter, and UNC paths.
+- UTF-8 output degrades safely on restricted consoles.
+- The Python implementation supports Python 3.8 through 3.13.
 
 ## [2.0.0] — 2026-08-16
 
-### Added — user-set priority, preemption, pause/resume, subagent lineage
-- `prioritize`: human-only priority ranks (bulk `--order "a=1,b=2"`, single,
-  clear). Ranks are lexicographic tuples: `1 < 1a < 1b < 2 < unranked`.
-- Subagent lineage: `register --parent <id> --slot <a-z>` derives child ranks
-  (`1a`, `1b`) **live** from the parent's current rank; re-ranking a parent
-  instantly re-ranks its children; parent outranks its own children.
-- `preempt`: checkpoint-safe priority hand-off — requires a user-recorded rank,
-  only affects strictly-lower-ranked holders, sends a deduplicated
-  `USER-PRIORITY REQUEST`, and queues the requester as a waiter. Never seizes.
-- `pause` / `resume`: paused claims stop blocking but keep a reserved resume spot
-  and a checkpoint note returned verbatim on resume; paused claims still TTL-expire
-  with a warning. `resume` re-acquires all paused claims atomically.
-- **Fencing**: a claim on a free resource is `QUEUED` (rc 75) when a live,
-  actively-polling waiter with strictly better rank — or equal rank and earlier
-  queue position — waits in a conflicting mode. The release boundary honors the
-  priority queue, not the poll lottery.
-- FIFO tie-break at equal rank; ranked sessions order ahead of unranked.
-- Urgent-alert channel: any board touch with unread `preempt_request`/`priority`
-  notifications prints `⚠ N urgent notification(s) pending` on **stderr**.
-- v1-schema databases upgrade in place via additive `ALTER TABLE` migrations
-  (pinned-fixture test); with no ranks recorded, behavior is byte-for-byte v1.
+### Added
 
-### Tests
-- 26-check priority/lineage/fencing/migration suite (`selftest_priority.sh`).
+- Added user-set priority ranks, inherited subagent ranks, cooperative preemption,
+  checkpointed pause/resume, and explicit break-glass release.
+- Added FIFO queue fencing among equal-ranked waiters and urgent notifications for
+  priority and preemption changes.
+- Added additive migration from the v1 database schema.
 
 ## [1.0.0] — 2026-08-15
 
-### Added — the core cooperative board
-- SQLite (WAL) registry: sessions / claims / waiters / notifications.
-- `register`, `claim` (atomic all-or-nothing multi-resource, `shared`/`exclusive`
-  modes, TTL), `check`, `wait`, `release`, `done`, `inbox`, `status`, `steal`.
-- Typed resource keys (`file:` with directory-boundary conflict detection,
-  `skill:`, `memory`, `ui:`, `box:`, `cron-store`) with path canonicalization.
-- `claim --wait`: polite single-invocation polling; release notifications to
-  waiters ("released by co-worker").
-- Crash safety: per-claim TTL reaping with expired-holder warnings, stale-session
-  cleanup (24 h), notification pruning (7 d). No daemon — all maintenance lazy.
-- sysexits contract: rc 0 = acquired, rc 75 (`EX_TEMPFAIL`) = busy/queued.
-- 19-check regression suite (`selftest.sh`).
+### Added
+
+- Added the SQLite intention board with sessions, atomic resource claims, waiters,
+  notifications, TTL expiry, and stale-session cleanup.
+- Added `register`, `claim`, `check`, `wait`, `release`, `done`, `inbox`, `status`,
+  and `steal` commands.
+- Added typed resource keys with directory-boundary conflict detection and the
+  exit-code contract of 0 for success and 75 for held or queued resources.
