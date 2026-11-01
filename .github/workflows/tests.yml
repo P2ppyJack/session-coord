@@ -20,6 +20,13 @@ jobs:
           # macos-latest is arm64; no 3.8 builds published
           - os: macos-latest
             python: "3.8"
+          # ubuntu-latest moved to Ubuntu 26.04 (2026-10-19), where no Python
+          # 3.8 builds are published. Keep the 3.8 leg on 22.04.
+          - os: ubuntu-latest
+            python: "3.8"
+        include:
+          - os: ubuntu-22.04
+            python: "3.8"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
