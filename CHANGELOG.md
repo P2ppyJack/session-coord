@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.1] — 2026-11-04
+
+### Changed
+
+- Documented two claim-boundary facts in the skill's pitfalls. A job's footprint
+  is wider than the resource set it declares: individual stages can run their own
+  guards over resources the job never declares, so while a job you triggered is
+  still running, claim nothing any of its stages touch — a held `skill:<name>`
+  claim can silently defer such a stage (exit 75) while every other stage passes.
+- Documented that the post-turn background skill review does not consult the
+  board. A `skill:<name>` claim therefore never freezes that skill: re-read it
+  immediately before every write, and treat a failed exact-match patch as proof
+  the file moved rather than a reason to widen the match.
+
 ## [2.6.0] — 2026-09-25
 
 ### Added
