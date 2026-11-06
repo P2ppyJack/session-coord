@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.2] — 2026-11-05
+
+### Fixed
+
+- The managed memory rule now registers with
+  `ID=$(python3 <cli> register --task '...' --surface <surface> | head -1)`.
+  `register` prints the session ID followed by co-worker notes, so capturing
+  its whole output put those notes into `$ID` whenever other sessions were
+  active, and the next `claim --id "$ID"` failed. The installer upgrades a
+  2.6.1 block in place, `status` still counts it as wired, and the
+  post-install quick-start example has the same fix.
+
 ## [2.6.1] — 2026-11-04
 
 ### Changed

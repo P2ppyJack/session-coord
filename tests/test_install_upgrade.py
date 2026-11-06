@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -379,3 +381,47 @@ def test_check_is_read_only_and_honors_wiring_opt_outs(tmp_path: Path):
     assert not dest.exists()
     assert not state.exists()
     assert not list(memory.parent.glob("*.bak-*"))
+
+
+BOARD_V2_2_6_1_SHA256 = "b77c3929f040771f801828141074975c0e7d808f1a7b926027d1d71980332900"
+CLI = ROOT / "skills" / "multi-session-coordination" / "scripts" / "session_coord.py"
+
+
+def test_previous_board_template_is_the_exact_2_6_1_text():
+    digest = hashlib.sha256(INSTALL.BOARD_WIRE_TEMPLATE_2_6_1.encode("utf-8")).hexdigest()
+    assert digest == BOARD_V2_2_6_1_SHA256
+
+
+def test_board_rule_captures_only_the_registered_id():
+    assert "--surface <surface> | head -1)`" in INSTALL.BOARD_WIRE_TEMPLATE
+    assert INSTALL.BOARD_WIRE_TEMPLATE.count("python3 {sc}") == 5
+
+
+def test_cli_accepts_current_and_2_6_1_board_fingerprints():
+    source = CLI.read_text(encoding="utf-8")
+    accepted = set(re.findall(r'"([0-9a-f]{64})"', source.split("BOARD_WIRE_HASHES", 1)[1].split("})", 1)[0]))
+    current = hashlib.sha256(INSTALL.BOARD_WIRE_TEMPLATE.encode("utf-8")).hexdigest()
+    assert accepted == {current, BOARD_V2_2_6_1_SHA256}
+
+
+def test_installer_upgrades_2_6_1_board_block_in_place(tmp_path: Path):
+    home = tmp_path / "home"
+    memory = home / "memories" / "MEMORY.md"
+    memory.parent.mkdir(parents=True)
+    dest = tmp_path / "scripts"
+    coord = dest / "session_coord.py"
+    old_block = INSTALL.BOARD_WIRE_TEMPLATE_2_6_1.format(sc=shlex.quote(str(coord)))
+    memory.write_text("operator note\n§\n" + old_block + "\n§\nlater note\n", encoding="utf-8")
+
+    first = _run(home, memory, dest, tmp_path / "state")
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    expected = "operator note\n§\n" + INSTALL.board_memory_block(coord) + "\n§\nlater note\n"
+    assert memory.read_text(encoding="utf-8") == expected
+    assert len(list(memory.parent.glob("MEMORY.md.bak-*"))) == 1
+
+    second = _run(home, memory, dest, tmp_path / "state")
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "already current" in second.stdout
+    assert memory.read_text(encoding="utf-8") == expected

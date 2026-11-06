@@ -165,6 +165,25 @@ BOARD_WIRE_TEMPLATE = (
     "STANDING RULE — session-coord (board-wire v2): Before mutating shared "
     "resources (files, skills, memory, cron store, remote boxes, or desktop UI), "
     "first run `python3 {sc} status`. Register once per task with "
+    "`ID=$(python3 {sc} register --task '...' --surface <surface> | head -1)` (its first "
+    "output line is the ID; co-worker notes follow), then "
+    "atomically claim every required resource with `python3 {sc} claim --id $ID "
+    "--res <key> [--res <key2>]`. Continue only after CLAIMED; when HELD/QUEUED, "
+    "do not mutate the requested resources—use `check`, `inbox`, or one bounded "
+    "`--wait` shell call and wait for release. Run `python3 {sc} done --id $ID` "
+    "at task end. Priorities are user-set; never `steal` without explicit approval. "
+    "Full protocol: skill multi-session-coordination. Off-switch: "
+    "`python3 {sc} disable`.\n" + BOARD_WIRE_END
+)
+
+# Exact board-v2 text written by 2.6.1. Its register example captured the
+# whole command output, which also holds co-worker notes; installs upgrade
+# it in place to the current template.
+BOARD_WIRE_TEMPLATE_2_6_1 = (
+    BOARD_WIRE_BEGIN + "\n"
+    "STANDING RULE — session-coord (board-wire v2): Before mutating shared "
+    "resources (files, skills, memory, cron store, remote boxes, or desktop UI), "
+    "first run `python3 {sc} status`. Register once per task with "
     "`ID=$(python3 {sc} register --task '...' --surface <surface>)`, then "
     "atomically claim every required resource with `python3 {sc} claim --id $ID "
     "--res <key> [--res <key2>]`. Continue only after CLAIMED; when HELD/QUEUED, "
@@ -174,6 +193,7 @@ BOARD_WIRE_TEMPLATE = (
     "Full protocol: skill multi-session-coordination. Off-switch: "
     "`python3 {sc} disable`.\n" + BOARD_WIRE_END
 )
+
 
 
 def _template_pattern(template: str) -> re.Pattern:
@@ -213,7 +233,10 @@ def _classify_board_memory(content: str, sc: Path) -> tuple:
             return "ambiguous", content
         block = content[begin:end]
         normalized = block.replace("\r\n", "\n")
-        if _template_pattern(BOARD_WIRE_TEMPLATE).fullmatch(normalized) is None:
+        if not any(
+            _template_pattern(template).fullmatch(normalized)
+            for template in (BOARD_WIRE_TEMPLATE, BOARD_WIRE_TEMPLATE_2_6_1)
+        ):
             return "ambiguous", content
         wanted = board_memory_block(sc, newline=_line_sep(content))
         if block == wanted:
@@ -1096,7 +1119,7 @@ def main() -> int:
 
         print("\nQuick start:")
         sc_arg = shlex.quote(str(sc))
-        print(f"  ID=$(python3 {sc_arg} register --task 'my task' --surface cli)")
+        print(f"  ID=$(python3 {sc_arg} register --task 'my task' --surface cli | head -1)")
         print(f'  python3 {sc_arg} claim --id "$ID" --res file:/some/path')
         print(f'  python3 {sc_arg} done  --id "$ID"')
         print(f"  python3 {sc_arg} switch          # master on/off state")
