@@ -1,7 +1,7 @@
 ---
 name: multi-session-coordination
 description: "Coordinate concurrent sessions: claim shared resources."
-version: 2.6.2
+version: 2.6.3
 author: Tobias Musser (P2ppyJack), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -137,7 +137,9 @@ it); quiet long-running holders should run `heartbeat --id <ID>` every few
 minutes. Inspect resource state before the first mutation after an expired or
 reaped holder. Use a longer `--ttl` for multi-hour work and refresh the same
 idempotent claim after long interruptions. For one-shot shell work, use
-`coord_run.sh` so `done` runs after normal exit, failure, or termination.
+`coord_run.sh` so `done` runs after normal exit, failure, or termination. A
+session that runs any verb is revived from stale, and a waiting yield episode
+keeps its session active, so a holder's release always enqueues the wake.
 
 ### 3. Coordinate subagents and bots
 

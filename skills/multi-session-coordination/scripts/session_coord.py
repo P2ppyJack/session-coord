@@ -472,9 +472,18 @@ def resolve_session(conn, token):
 # ---------------------------------------------------------------- db helpers
 
 def touch_session(conn, sid):
-    """Update last_seen for liveness tracking (called on every verb)."""
+    """Update last_seen for liveness tracking (called on every verb).
+
+    A verb is proof the session is alive, so a stale row is revived here.  Without
+    this a session that went stale (an hour without a board call) and then parked
+    with `claim --yield` kept status='stale'; episode_ready() requires 'active', so
+    the release after it never enqueued a wake event and the park waited forever.
+    """
     if sid:
-        conn.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now(), sid))
+        conn.execute(
+            "UPDATE sessions SET last_seen=?, "
+            "status=CASE WHEN status='stale' THEN 'active' ELSE status END WHERE id=?",
+            (now(), sid))
 
 
 def notify(conn, to_session, from_session, resource, kind, body, dedupe=False):
@@ -569,6 +578,15 @@ def reap(conn):
         "UPDATE sessions SET status='stale' WHERE status='active' AND last_seen < ? "
         "AND id NOT IN (SELECT session_id FROM wait_episodes WHERE status='waiting')",
         (t - STALE_SESSION_S,),
+    )
+    # A waiting episode keeps its session alive by definition (the staleness sweep
+    # above excludes it), and episode_ready() requires 'active'.  Revive a row
+    # already marked stale while it has a waiting episode, so a session that went
+    # stale BEFORE parking (the old touch_session gap) heals on the next command
+    # instead of leaving its wake event unenqueueable forever.
+    conn.execute(
+        "UPDATE sessions SET status='active' WHERE status='stale' "
+        "AND id IN (SELECT session_id FROM wait_episodes WHERE status='waiting')"
     )
     # v2.5: auto-REAP the held claims of every session that has gone stale. This
     # recovers the "co-worker says WAITING, but the holder finished without

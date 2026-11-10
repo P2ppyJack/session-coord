@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.3] — 2026-11-09
+
+### Fixed
+
+- A session that had gone stale (the default 60-minute window without a board
+  call) could park a yield episode that never became eligible: `touch_session()`
+  refreshed only `last_seen`, `episode_ready()` requires `status='active'`, and
+  the holder's release therefore enqueued no wake event at all. `touch_session()`
+  now revives a stale row on any verb, and `reap()` revives a stale session that
+  still has a waiting episode. Regression test:
+  `test_stale_session_park_still_enqueues_its_release_wake`.
+
 ## [2.6.2] — 2026-11-05
 
 ### Fixed

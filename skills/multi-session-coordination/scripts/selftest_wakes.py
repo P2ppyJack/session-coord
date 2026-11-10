@@ -250,6 +250,54 @@ class WakeCLITest(unittest.TestCase):
             ).fetchall()
         self.assertEqual(held, [("res:A",)])
 
+    def test_stale_session_park_still_enqueues_its_release_wake(self):
+        """A session that went stale before parking must still wake on release.
+
+        Regression for T-61: touch_session() refreshed only last_seen, so the row
+        stayed 'stale'; episode_ready() requires 'active', and the holder's release
+        then enqueued nothing at all (empty outbox, wake_seq 0).
+        """
+        self.register("holder")
+        self.register("waiter")
+        self.run_cli("claim", "--id", "holder", "--res", "res:A")
+
+        # Simulate the reaper: an hour of board silence marks the row stale.
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE sessions SET status='stale' WHERE id='waiter'")
+
+        yielded, _ = self.yield_claim("waiter", ["res:A"])
+        self.assertTrue(yielded["yielded"])
+        # The park itself proves the session is alive: the verb must revive it.
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM sessions WHERE id='waiter'").fetchone()[0],
+                "active",
+            )
+
+        # Second half of the fix: a row already stale while its episode waits is
+        # revived by any command's reap(), not only by a verb from that session.
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE sessions SET status='stale' WHERE id='waiter'")
+        self.register("third")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM sessions WHERE id='waiter'").fetchone()[0],
+                "active",
+            )
+
+        self.run_cli("release", "--id", "holder", "--res", "res:A")
+        pending = self.run_cli("wake-pending", "--profile-home", str(self.profile))
+        self.assertEqual(len(pending["events"]), 1)
+        event = pending["events"][0]["event"]
+        self.assertEqual(event["native_session_id"], "native-waiter")
+        self.assertEqual(event["reason"], "released")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            seq = conn.execute(
+                "SELECT wake_seq FROM wait_episodes WHERE episode_id=?",
+                (event["episode_id"],),
+            ).fetchone()[0]
+        self.assertEqual(seq, 1)
+
     def test_partial_release_then_partial_ttl_expiry_wakes_only_full_set(self):
         self.register("hold-a")
         self.register("hold-b")
