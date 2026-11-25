@@ -316,6 +316,33 @@ EOF
 OUT=$(co status 2>&1)
 if echo "$OUT" | grep -q "UNWIRED"; then bad "13d. 2.6.1 managed rule should still count as wired: $OUT"; else ok "13d. 2.6.1 managed rule still counts as wired"; fi
 
+# --- 14. read-only jobs (policy=readonly) never claim and never raise advisories.
+#     Own store + manifest (earlier sections repoint both); a wait-policy twin is
+#     the negative control proving the advisory path really sees the job.
+NEXT7=$(python3 -c "from datetime import datetime,timedelta; print((datetime.now().astimezone()+timedelta(minutes=7)).isoformat())")
+export HERMES_COORD_CRON_JOBS="$D/jobs_ro.json"
+export HERMES_COORD_CRON_MANIFEST="$D/manifest_ro.json"
+printf '{"jobs":[{"id":"snapshotjob01","name":"tree snapshot","enabled":true,"next_run_at":"%s","last_run_at":null}]}\n' \
+  "$NEXT7" > "$HERMES_COORD_CRON_JOBS"
+ro_manifest(){
+  printf '{"jobs":{"snapshotjob01":{"name":"tree snapshot","resources":["file:%s/ro"],"policy":"%s","critical":true}}}\n' \
+    "$D" "$1" > "$HERMES_COORD_CRON_MANIFEST"
+}
+RS=$(co register --task "editing ro tree" | head -1)
+ro_manifest wait
+OUT=$(co claim --id "$RS" --res "file:$D/ro" --task edit 2>&1)
+if echo "$OUT" | grep -q "CRITICAL cron 'tree snapshot'"; then ok "14a. control: the same job with policy=wait raises the advisory"; else bad "14a. control saw no advisory: $OUT"; fi
+co release --id "$RS" --res "file:$D/ro" >/dev/null 2>&1
+ro_manifest readonly
+OUT=$(co claim --id "$RS" --res "file:$D/ro" --task edit 2>&1)
+if echo "$OUT" | grep -q "CLAIMED" && ! echo "$OUT" | grep -q "tree snapshot"; then ok "14b. policy=readonly raises no advisory on an overlapping claim"; else bad "14b. $OUT"; fi
+HELD_BEFORE=$(co status --json 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('held_claims') or []))")
+GOUT=$(co cron-guard --job snapshotjob01 2>"$D/roerr.txt"); RC=$?
+if [ $RC -eq 0 ] && [ -z "$GOUT" ]; then ok "14c. readonly cron-guard proceeds (rc 0, empty guard id) while the tree is held"; else bad "14c. rc=$RC out=$GOUT err=$(cat "$D/roerr.txt")"; fi
+if grep -q "read-only (manifest policy=readonly)" "$D/roerr.txt"; then ok "14d. readonly guard says why on stderr"; else bad "14d. $(cat "$D/roerr.txt")"; fi
+HELD=$(co status --json 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('held_claims') or []))")
+if [ -n "$HELD" ] && [ "$HELD" = "$HELD_BEFORE" ]; then ok "14e. readonly guard took no claim (held $HELD before and after)"; else bad "14e. held before=$HELD_BEFORE after=$HELD"; fi
+co "done" --id "$RS" >/dev/null 2>&1
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 rm -rf "$D"

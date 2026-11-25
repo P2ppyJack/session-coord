@@ -52,6 +52,7 @@ class WakeCLITest(unittest.TestCase):
         )
         self.env.pop("HERMES_SESSION_ID", None)
         self.env.pop("HERMES_HOME", None)
+        self.env.pop("HERMES_SESSION_KEY", None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -732,6 +733,55 @@ class WakeCLITest(unittest.TestCase):
             "--kind", "desktop"
         )["event"]
         self.assertIsNotNone(event)
+
+    def test_register_auto_captures_delivery_session_key(self):
+        self.register("holder")
+        self.env["HERMES_SESSION_ID"] = "native-keyed"
+        self.env["HERMES_HOME"] = str(self.profile)
+        self.env["HERMES_SESSION_KEY"] = "agent:main:local:dm:native-keyed"
+        self.run_cli("register", "--id", "keyed", "--task", "keyed", "--surface", "desktop")
+        self.env.pop("HERMES_SESSION_KEY")
+        self.env["HERMES_SESSION_ID"] = "native-unkeyed"
+        self.run_cli("register", "--id", "unkeyed", "--task", "plain", "--surface", "desktop")
+        self.run_cli("claim", "--id", "holder", "--res", "res:A")
+        self.yield_claim("keyed", ["res:A"])
+        self.yield_claim("unkeyed", ["res:A"])
+        pending = self.run_cli("wake-pending", "--profile-home", str(self.profile))
+        targets = {ep["native_session_id"]: ep["target"] for ep in pending["episodes"]}
+        self.assertEqual(
+            targets["native-keyed"]["delivery_session_key"], "agent:main:local:dm:native-keyed"
+        )
+        # A host-admitted receiver validates `session_key`; the capture never writes it.
+        self.assertNotIn("session_key", targets["native-keyed"])
+        self.assertNotIn("delivery_session_key", targets["native-unkeyed"])
+        self.run_cli("release", "--id", "holder", "--res", "res:A")
+        event = self.run_cli(
+            "wake-lease", "--worker", "keyed-worker", "--transport", "hermes",
+            "--profile-home", str(self.profile), "--native-session-id", "native-keyed",
+            "--kind", "desktop"
+        )["event"]
+        self.assertEqual(
+            event["target"]["delivery_session_key"], "agent:main:local:dm:native-keyed"
+        )
+
+    def test_explicit_target_rejects_blank_delivery_session_key(self):
+        target = {
+            "profile_home": str(self.profile), "kind": "desktop", "session_id": "native-bad",
+            "delivery_session_key": "  ",
+        }
+        proc = self.run_cli(
+            "register", "--id", "bad-key", "--task", "bad", "--surface", "desktop",
+            "--native-session-id", "native-bad", "--wake-transport", "hermes",
+            "--wake-target-json", json.dumps(target), rc=1, json_output=False,
+        )
+        self.assertIn("delivery_session_key must be a non-empty string", proc.stderr)
+        target["delivery_session_key"] = "agent:main:local:dm:native-bad"
+        registered = self.run_cli(
+            "register", "--id", "good-key", "--task", "good", "--surface", "desktop",
+            "--native-session-id", "native-bad", "--wake-transport", "hermes",
+            "--wake-target-json", json.dumps(target),
+        )
+        self.assertEqual(registered["native_session_id"], "native-bad")
 
     def test_v2_migration_does_not_backfill_legacy_waiter(self):
         with closing(sqlite3.connect(self.db_path)) as conn, conn:

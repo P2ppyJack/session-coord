@@ -76,11 +76,12 @@ unreleased until their compatibility and runtime acceptance gates are met.
   shell guard and shell selftests require a POSIX shell; Git Bash is supported on
   Windows when available.
 - The optional `session-coord-native` plugin is declared for Linux and macOS, not
-  Windows. Native continuation requires that separate plugin plus a Hermes host
-  exposing the public native-turn-source registrar and effective joined-delegation
-  policy helper proposed in [NousResearch/hermes-agent PR #110232](https://github.com/NousResearch/hermes-agent/pull/110232).
-  No Hermes version is considered compatible by version number alone;
-  `hermes_setup.py check` must prove those capabilities for every selected profile.
+  Windows. From plugin 0.4.0 it runs on stock Hermes v0.23.3 or newer: it delivers
+  wakes through the public `PluginContext.inject_message` API and plugin hooks, with
+  no patched Hermes build. A host that also exposes the native-turn-source registrar
+  proposed in [NousResearch/hermes-agent PR #110232](https://github.com/NousResearch/hermes-agent/pull/110232)
+  uses that path instead. A version number alone is not accepted as proof;
+  `hermes_setup.py check` must prove the capabilities for every selected profile.
 - Existing board CLI contracts, SQLite state, cron manifests, and board-only
   operation remain supported without the plugin. Native continuation remains an
   optional, unreleased integration.
@@ -266,16 +267,20 @@ A skill-only install places the CLI under the installed skill's `scripts/`
 directory. It does not perform system-wide board enrollment; use `install.py` or
 copy the managed examples explicitly.
 
-## Optional Hermes native continuation — unreleased
+## Optional Hermes native continuation
 
-Native continuation requires two separately supplied, compatible components:
+Native continuation needs the external plugin named `session-coord-native` and a
+Hermes host it can deliver through. The plugin picks the delivery path itself:
 
-1. a Hermes host with the generic native-turn-source registrar and the documented
-   joined-delegation policy helper;
-2. the external plugin named `session-coord-native`.
+| Host | Delivery | Joined-delegation key | Consent key |
+|---|---|---|---|
+| Stock Hermes v0.23.3+ | `inject`: public `inject_message(session_key=...)` + hooks | `delegation.gateway_mode: inline` | `plugins.entries.session-coord-native.allow_gateway_injection: true` |
+| Host with the native-turn-source registrar | `native`: the host polls the plugin's source | `delegation.wait_for_all: true` | none |
 
-These capabilities are not part of the stable board release, and this repository
-does not claim upstream acceptance or activation in an already running process.
+On a stock host a wake reaches a session that a running Hermes process hosts. A
+wake for a closed Desktop conversation waits until that conversation is opened again;
+the plugin cannot reopen it. The repository does not claim activation in an already
+running process.
 The helper proves the real registration API with Hermes Plugin Doctor; a stored
 config key or version string is not accepted as capability proof.
 
@@ -305,8 +310,10 @@ or restart. For every selected profile it verifies:
 - the profile resolves through `hermes -p PROFILE config path`;
 - `hermes -p PROFILE plugins doctor /ABS/PLUGIN --ci` exercises real plugin
   registration;
-- the installed plugin, enablement state, exact Boolean
-  `delegation.wait_for_all`, and plugin-owned `native-check --json` agree;
+- the installed plugin, enablement state, the delivery path's joined-delegation key
+  (`delegation.wait_for_all` as an exact Boolean, or `delegation.gateway_mode` as the
+  string `inline` on a stock host), the stock host's consent key, and plugin-owned
+  `native-check --json` agree;
 - board and native managed enrollment are current.
 
 A failure in any profile makes the global result not ready.
@@ -328,12 +335,14 @@ It then uses only sanctioned Hermes operations:
 1. install or upgrade the immutable plugin revision;
 2. Doctor the installed copy;
 3. enable `session-coord-native` without built-in tool override;
-4. call `session-coord native-check --json` and require real native-source and
+4. on a stock host, set `plugins.entries.session-coord-native.allow_gateway_injection`
+   to `true` through `hermes config set` when it is not already, and require an exact
+   JSON Boolean `true` on readback;
+5. call `session-coord native-check --json` and require real delivery and
    joined-policy support;
-5. set `delegation.wait_for_all` to `true` through `hermes config set` only when
-   needed;
-6. require an exact JSON Boolean `true` from `hermes config get ... --json` and
-   repeat `native-check`;
+6. set the delivery path's joined-delegation key through `hermes config set` only
+   when needed (`delegation.wait_for_all true`, or `delegation.gateway_mode inline`
+   on a stock host), require the exact readback, and repeat `native-check`;
 7. after every selected profile succeeds, write the separate managed native
    enrollment block.
 

@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.4] — 2026-11-25
+
+### Added
+
+- A wake target derived at registration now records the conversation's gateway route
+  as `delivery_session_key` (from `HERMES_SESSION_KEY`). A stock Hermes host delivers a
+  wake through the public plugin API by this exact key; `session-coord-native` 0.4.0
+  uses it. An explicit `--wake-target-json` may carry the field, and a blank value is
+  rejected. The receiver-validated `session_key` field is never written by capture.
+- Cron manifest `policy: "readonly"` for jobs that only read (backups, snapshots):
+  `cron-guard` takes no claim and exits 0 with an empty guard id, and claims raise no
+  advisory for such a job.
+- `hermes_setup.py` configures a stock Hermes v0.23.3+ host: it sets the plugin's
+  `allow_gateway_injection` consent key and `delegation.gateway_mode: inline`,
+  verifies both readbacks, and reports the profile's `delivery` path.
+
 ## [2.6.3] — 2026-11-09
 
 ### Fixed

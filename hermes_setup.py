@@ -29,6 +29,12 @@ import install as board_installer
 
 PLUGIN_NAME = "session-coord-native"
 WAIT_KEY = "delegation.wait_for_all"
+# A stock Hermes host (no native-turn-source registrar) joins delegations in the turn
+# through ``delegation.gateway_mode: inline`` and admits plugin wakes only after the
+# plugin's own ``allow_gateway_injection`` consent key is true.
+INJECT_WAIT_KEY = "delegation.gateway_mode"
+INJECT_WAIT_VALUE = "inline"
+INJECT_CONSENT_KEY = f"plugins.entries.{PLUGIN_NAME}.allow_gateway_injection"
 NATIVE_BEGIN = "<!-- BEGIN session-coord managed hermes-native-v1 -->"
 NATIVE_END = "<!-- END session-coord managed hermes-native-v1 -->"
 NATIVE_MARKER = "session-coord (hermes-native-wire v1)"
@@ -311,7 +317,22 @@ def _atomic_enroll(
         return "failed", f"{type(exc).__name__}: {exc}"
 
 
+def _inject_delivery(payload: dict[str, Any]) -> bool:
+    return payload.get("delivery") == "inject"
+
+
+def _wait_key(payload: dict[str, Any]) -> str:
+    return INJECT_WAIT_KEY if _inject_delivery(payload) else WAIT_KEY
+
+
 def _validate_native(payload: dict[str, Any], *, require_wait_true: bool) -> str | None:
+    delivery = payload.get("delivery", "native")
+    if delivery not in ("native", "inject"):
+        return "native-check delivery must be native or inject"
+    if delivery == "inject" and payload.get("wait_policy_key") != INJECT_WAIT_KEY:
+        return f"native-check inject delivery must report wait_policy_key {INJECT_WAIT_KEY}"
+    if delivery == "inject" and payload.get("gateway_injection_allowed") is not True:
+        return str(payload.get("reason") or f"{INJECT_CONSENT_KEY} is not true")
     if payload.get("supported") is not True:
         return str(payload.get("reason") or "native turn-source registration is unsupported")
     surfaces = payload.get("surfaces")
@@ -351,16 +372,56 @@ def _plugins_enabled(result: CommandResult) -> tuple[bool | None, str | None]:
     return PLUGIN_NAME in enabled and PLUGIN_NAME not in disabled, None
 
 
-def _read_wait(result: CommandResult) -> tuple[bool | None, str | None]:
+def _read_wait(
+    result: CommandResult, key: str = WAIT_KEY
+) -> tuple[bool | None, str | None]:
+    if key == INJECT_WAIT_KEY:
+        if result.returncode != 0:
+            if "Config key not set" in f"{result.stdout}\n{result.stderr}":
+                return False, None
+            return None, _reason(result)
+        try:
+            value = _json_value(result.stdout, f"config get {key}")
+        except JsonError as exc:
+            return None, str(exc)
+        if type(value) is not str:
+            return None, f"{key} readback must be a string, not {type(value).__name__}"
+        return value.strip().lower() == INJECT_WAIT_VALUE, None
     if result.returncode != 0:
         return None, _reason(result)
     try:
-        value = _json_value(result.stdout, f"config get {WAIT_KEY}")
+        value = _json_value(result.stdout, f"config get {key}")
     except JsonError as exc:
         return None, str(exc)
     if type(value) is not bool:
-        return None, f"{WAIT_KEY} readback must be a true Boolean, not {type(value).__name__}"
+        return None, f"{key} readback must be a true Boolean, not {type(value).__name__}"
     return value, None
+
+
+def _read_consent(result: CommandResult) -> tuple[bool | None, str | None]:
+    if result.returncode != 0:
+        if "Config key not set" in f"{result.stdout}\n{result.stderr}":
+            return False, None
+        return None, _reason(result)
+    try:
+        value = _json_value(result.stdout, f"config get {INJECT_CONSENT_KEY}")
+    except JsonError as exc:
+        return None, str(exc)
+    if type(value) is not bool:
+        return None, (
+            f"{INJECT_CONSENT_KEY} readback must be a true Boolean, not {type(value).__name__}"
+        )
+    return value, None
+
+
+def _read_native_raw(result: CommandResult) -> tuple[dict[str, Any] | None, str | None]:
+    """The native-check JSON object before capability validation (exit 1 = not ready)."""
+    if result.returncode not in (0, 1):
+        return None, _reason(result)
+    try:
+        return _json_object(result.stdout, "native-check"), None
+    except JsonError as exc:
+        return None, str(exc) if result.returncode == 0 else _reason(result)
 
 
 def _read_native(
@@ -428,8 +489,8 @@ def _preflight(
             item.update(
                 status="unsupported_host",
                 reason=(
-                    "plugin registration Doctor failed; update Hermes to a host with the "
-                    f"native-turn-source registrar: {_reason(doctor)}"
+                    "plugin registration Doctor failed; update Hermes to v0.23.3 or newer: "
+                    f"{_reason(doctor)}"
                 ),
             )
             all_ok = False
@@ -510,15 +571,18 @@ def _check_profile(
             status="setup_required", plugin="disabled", reason=error or "plugin is not enabled"
         )
         return
-    wait, error = _read_wait(_hermes(runner, hermes, profile, "config", "get", WAIT_KEY, "--json"))
+    native = _hermes(runner, hermes, profile, "session-coord", "native-check", "--json")
+    raw, _raw_error = _read_native_raw(native)
+    wait_key = _wait_key(raw or {})
+    item["delivery"] = "inject" if _inject_delivery(raw or {}) else "native"
+    wait, error = _read_wait(
+        _hermes(runner, hermes, profile, "config", "get", wait_key, "--json"), wait_key
+    )
     if error:
         item.update(status="setup_required", reason=error)
         return
     item["wait_for_all"] = wait
-    payload, error = _read_native(
-        _hermes(runner, hermes, profile, "session-coord", "native-check", "--json"),
-        require_wait_true=True,
-    )
+    payload, error = _read_native(native, require_wait_true=True)
     if error or payload is None:
         item.update(status="setup_required", reason=error or "native-check failed")
         return
@@ -529,7 +593,7 @@ def _check_profile(
         activation=payload["activation"],
     )
     if wait is not True:
-        item.update(status="setup_required", reason=f"{WAIT_KEY} is false")
+        item.update(status="setup_required", reason=f"{wait_key} is not enabled")
     elif item["native_enrollment"] != "current":
         item.update(status="setup_required", reason="native managed enrollment is absent or stale")
     else:
@@ -591,20 +655,41 @@ def _setup_profile(
         if error or not enabled:
             return error or "plugin enable did not persist"
     item["plugin"] = "enabled"
+    raw, error = _read_native_raw(
+        _hermes(runner, hermes, profile, "session-coord", "native-check", "--json")
+    )
+    if error or raw is None:
+        return error or "native-check failed after enable"
+    if _inject_delivery(raw) and raw.get("gateway_injection_allowed") is not True:
+        # A stock host admits a plugin's injected turn only after this consent key.
+        item["_mutation_performed"] = True
+        consent = _hermes(runner, hermes, profile, "config", "set", INJECT_CONSENT_KEY, "true")
+        if consent.returncode != 0:
+            return f"config set failed or is uncertain: {_reason(consent)}"
+        allowed, error = _read_consent(
+            _hermes(runner, hermes, profile, "config", "get", INJECT_CONSENT_KEY, "--json")
+        )
+        if error or allowed is not True:
+            return error or f"{INJECT_CONSENT_KEY} readback is false"
     preliminary, error = _read_native(
         _hermes(runner, hermes, profile, "session-coord", "native-check", "--json"),
         require_wait_true=False,
     )
     if error or preliminary is None:
         return error or "native-check failed after enable"
+    wait_key = _wait_key(preliminary)
+    wait_value = INJECT_WAIT_VALUE if wait_key == INJECT_WAIT_KEY else "true"
+    item["delivery"] = "inject" if _inject_delivery(preliminary) else "native"
     if preliminary["wait_for_all"] is not True:
         item["_mutation_performed"] = True
-        setting = _hermes(runner, hermes, profile, "config", "set", WAIT_KEY, "true")
+        setting = _hermes(runner, hermes, profile, "config", "set", wait_key, wait_value)
         if setting.returncode != 0:
             return f"config set failed or is uncertain: {_reason(setting)}"
-    wait, error = _read_wait(_hermes(runner, hermes, profile, "config", "get", WAIT_KEY, "--json"))
+    wait, error = _read_wait(
+        _hermes(runner, hermes, profile, "config", "get", wait_key, "--json"), wait_key
+    )
     if error or wait is not True:
-        return error or f"{WAIT_KEY} readback is false"
+        return error or f"{wait_key} readback is not enabled"
     final, error = _read_native(
         _hermes(runner, hermes, profile, "session-coord", "native-check", "--json"),
         require_wait_true=True,

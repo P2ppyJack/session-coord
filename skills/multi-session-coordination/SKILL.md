@@ -1,7 +1,7 @@
 ---
 name: multi-session-coordination
 description: "Coordinate concurrent sessions: claim shared resources."
-version: 2.6.3
+version: 2.6.4
 author: Tobias Musser (P2ppyJack), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -212,8 +212,13 @@ because sanctioned local plugin installation clones its `file://` URL at an
 immutable commit.
 
 The helper preflights every selected profile before mutation. It uses Hermes
-Plugin Doctor, sanctioned plugin install/enable and config commands, exact JSON
-Boolean readback of `delegation.wait_for_all`, and plugin-owned `native-check`.
+Plugin Doctor, sanctioned plugin install/enable and config commands, exact readback
+of the delivery path's joined-delegation key, and plugin-owned `native-check`. On
+stock Hermes v0.23.3+ the plugin delivers through the public `inject_message` API:
+setup also sets its `allow_gateway_injection` consent key, and the joined key is
+`delegation.gateway_mode: inline` (a native-registrar host uses
+`delegation.wait_for_all: true`). A stock host delivers only to a conversation a
+running Hermes process hosts; a closed one waits until it is opened.
 Only after every profile passes does it write the separate managed native block.
 Malformed JSON, unsupported host/policy, custom enrollment, or partial command
 state returns not-ready and no misleading native instruction.

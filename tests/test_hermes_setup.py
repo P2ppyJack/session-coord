@@ -87,6 +87,22 @@ if cmd == ["config", "get", "plugins", "--json"]:
         print("Config key not set: plugins", file=sys.stderr); raise SystemExit(2)
     value = {"enabled": ["session-coord-native"] if record.get("enabled") else [], "disabled": [] if record.get("enabled") else ["session-coord-native"]}
     print(json.dumps(value)); raise SystemExit(0)
+if cmd == ["config", "set", "plugins.entries.session-coord-native.allow_gateway_injection", "true"]:
+    if record.get("consent_fail"):
+        print("set failed", file=sys.stderr); raise SystemExit(1)
+    record["consent"] = True
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    print("set"); raise SystemExit(0)
+if cmd == ["config", "get", "plugins.entries.session-coord-native.allow_gateway_injection", "--json"]:
+    if "consent" not in record:
+        print("Config key not set: plugins.entries.session-coord-native.allow_gateway_injection", file=sys.stderr); raise SystemExit(2)
+    print(json.dumps(bool(record["consent"]))); raise SystemExit(0)
+if cmd == ["config", "set", "delegation.gateway_mode", "inline"]:
+    record["gateway_mode"] = "inline"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    print("set"); raise SystemExit(0)
+if cmd == ["config", "get", "delegation.gateway_mode", "--json"]:
+    print(json.dumps(record.get("gateway_mode", "auto"))); raise SystemExit(0)
 if cmd == ["config", "set", "delegation.wait_for_all", "true"]:
     if record.get("set_fail"):
         print("set failed", file=sys.stderr); raise SystemExit(1)
@@ -107,6 +123,11 @@ if cmd == ["session-coord", "native-check", "--json"]:
         print("{not-json"); raise SystemExit(0)
     if not (record.get("installed") and record.get("enabled")):
         print("command unavailable", file=sys.stderr); raise SystemExit(2)
+    if record.get("stock"):
+        allowed = bool(record.get("consent"))
+        inline = record.get("gateway_mode", "auto") == "inline"
+        payload = {"supported": allowed, "delivery": "inject", "gateway_injection_allowed": allowed, "surfaces": ["cli", "tui", "gateway"] if allowed else [], "wait_for_all_supported": True, "wait_for_all": inline, "wait_policy_key": "delegation.gateway_mode", "activation": "fresh_process_only", "reason": "" if allowed else "needs allow_gateway_injection"}
+        print(json.dumps(payload)); raise SystemExit(0 if allowed else 1)
     wait_supported = not record.get("wait_unsupported", False)
     payload = {"supported": True, "surfaces": ["cli", "tui", "gateway"], "wait_for_all_supported": wait_supported, "wait_for_all": bool(record.get("wait")) if wait_supported else None, "activation": "fresh_process_only", "reason": "" if wait_supported else "policy helper unavailable"}
     print(json.dumps(payload)); raise SystemExit(0)
@@ -490,3 +511,64 @@ def test_argument_errors_make_no_runner_calls(tmp_path: Path):
     result = _run(root, coord, plugin, state, log, stub, "setup")
     assert result.returncode == 2
     assert _calls(log) == []
+
+
+def _stock(state: Path, **fields) -> None:
+    data = json.loads(state.read_text(encoding="utf-8"))
+    data["profiles"]["default"].update(stock=True, **fields)
+    state.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_stock_host_setup_grants_consent_and_inline_join_then_enrolls(tmp_path: Path):
+    root, coord, plugin, state, log, stub = _fixture(tmp_path)
+    _stock(state)
+
+    result = _run(root, coord, plugin, state, log, stub, "setup", "--profile", "default")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    profile = payload["profiles"][0]
+    assert profile["status"] == "configured_restart_required"
+    assert profile["delivery"] == "inject"
+    assert profile["wait_for_all"] is True
+    sets = [call[2:] for call in _calls(log) if call[2:4] == ["config", "set"]]
+    assert sets == [
+        ["config", "set", "plugins.entries.session-coord-native.allow_gateway_injection", "true"],
+        ["config", "set", "delegation.gateway_mode", "inline"],
+    ]
+    assert not any("delegation.wait_for_all" in call for call in _calls(log))
+    assert "managed hermes-native-v1" in (root / "memories" / "MEMORY.md").read_text(encoding="utf-8")
+
+    check = _run(root, coord, plugin, state, log, stub, "check", "--profile", "default")
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert json.loads(check.stdout)["profiles"][0]["delivery"] == "inject"
+
+
+def test_stock_host_check_reports_missing_consent_without_mutation(tmp_path: Path):
+    root, coord, plugin, state, log, stub = _fixture(tmp_path)
+    setup = _run(root, coord, plugin, state, log, stub, "setup", "--profile", "default")
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    _stock(state, consent=False, gateway_mode="inline")
+    log.unlink()
+
+    result = _run(root, coord, plugin, state, log, stub, "check", "--profile", "default")
+
+    assert result.returncode == 1
+    profile = json.loads(result.stdout)["profiles"][0]
+    assert profile["status"] == "setup_required"
+    assert "allow_gateway_injection" in profile["reason"]
+    assert not any(call[2:4] == ["config", "set"] for call in _calls(log))
+
+
+def test_stock_host_consent_write_failure_is_partial_without_enrollment(tmp_path: Path):
+    root, coord, plugin, state, log, stub = _fixture(tmp_path)
+    _stock(state, consent_fail=True)
+
+    result = _run(root, coord, plugin, state, log, stub, "setup", "--profile", "default")
+
+    assert result.returncode == 1
+    profile = json.loads(result.stdout)["profiles"][0]
+    assert profile["status"] == "partial"
+    assert "config set failed" in profile["reason"]
+    assert "managed hermes-native-v1" not in (root / "memories" / "MEMORY.md").read_text(encoding="utf-8")
+

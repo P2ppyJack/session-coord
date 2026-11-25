@@ -955,6 +955,10 @@ def upcoming_cron_conflicts(resources, horizon_s):
         eta = j["next_ts"] - t
         if eta < -300 or eta > horizon_s:  # small grace for a just-fired tick
             continue
+        # Read-only jobs (backups, snapshots) never claim, so they never conflict:
+        # asking a session to step aside for one is noise.
+        if spec.get("policy") == "readonly":
+            continue
         for jr in spec["resources"]:
             for r in resources:
                 if resources_overlap(jr, r):
@@ -2180,6 +2184,16 @@ def cmd_cron_guard(a):
             return 1
         if job_id and job_id in man:
             resources.extend(r for r in man[job_id]["resources"] if r not in resources)
+            # Read-only jobs (backups, snapshots) do not observe claims: they capture
+            # whatever state exists. Exit 0 with NO stdout so the caller's guard id
+            # stays empty and the job proceeds unguarded.
+            if man[job_id].get("policy") == "readonly":
+                print(
+                    f"cron-guard: '{job_name}' is read-only (manifest policy=readonly) "
+                    f"-- no claims taken, running unguarded",
+                    file=sys.stderr,
+                )
+                return 0
     if not resources:
         print("cron-guard: no resources (give --res and/or a manifested --job)",
               file=sys.stderr)
