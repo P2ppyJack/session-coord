@@ -541,4 +541,4 @@ MIT. Copyright © 2026 Tobias Musser.
 
 ## Credits
 
-Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser.
+Prepared by a Custom Agentic Assistant built and developed in part by Tobias Musser.

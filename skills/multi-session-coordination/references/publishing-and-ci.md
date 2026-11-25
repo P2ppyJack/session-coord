@@ -46,3 +46,7 @@ Release notes describe technical changes, compatibility, tests, and limitations.
 After authorized publication, verify the remote commit/tag, release contents, and
 the actual Actions result. Preserve review history when updating an existing
 contribution instead of opening a duplicate.
+
+Public documentation, commit messages, PR descriptions, and release notes contain
+technical information and brief authorship or AI-assistance disclosures only.
+Internal preparation records and conversation narratives are not release assets.
